@@ -1,0 +1,13 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.venv/
+.env
+.idea/
+SourceCode/metastore_db/
+SourceCode/spark-warehouse/
+SourceCode/derby.log
+*.log
+Output/*.csv
+!Output/.gitkeep
