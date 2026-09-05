@@ -13,6 +13,8 @@ from pyspark.sql.functions import (
     current_timestamp,
     lit,
     round,
+    row_number,
+    sha2,
     size,
     to_date,
     when,
@@ -28,12 +30,14 @@ def record_pipeline_quality(
     raw_count: int,
     clean_count: int,
     rejected_count: int,
+    duplicate_count: int = 0,
     run_id: str | None = None,
     batch_id: str | None = None,
 ) -> None:
     """Ghi nhận số liệu giám sát Data Observability vào bảng Delta `pipeline_quality`."""
     try:
         from config import SETTINGS
+
         target_path = SETTINGS.get_storage_path(f"{SETTINGS.gold_monitoring_base}/pipeline_quality_delta")
         reject_rate = (rejected_count / raw_count * 100) if raw_count > 0 else 0.0
         row_data = [
@@ -41,12 +45,23 @@ def record_pipeline_quality(
                 run_id or "run_default",
                 batch_id or "batch_default",
                 int(raw_count),
+                int(duplicate_count),
                 int(clean_count),
                 int(rejected_count),
                 float(round(reject_rate, 2)),
+                "SUCCESS" if rejected_count == 0 else "QUARANTINE_PRESENT",
             )
         ]
-        schema = ["run_id", "batch_id", "raw_rows", "valid_rows", "rejected_rows", "reject_rate_percent"]
+        schema = [
+            "run_id",
+            "batch_id",
+            "raw_rows",
+            "duplicate_rows",
+            "valid_rows",
+            "rejected_rows",
+            "reject_rate_percent",
+            "status",
+        ]
         quality_df = (
             spark.createDataFrame(row_data, schema)
             .withColumn("recorded_at", current_timestamp())
@@ -57,7 +72,12 @@ def record_pipeline_quality(
         LOGGER.debug("Không thể ghi nhận pipeline_quality Delta table (có thể đang chạy unit test local): %s", e)
 
 
-def validate_silver_data(clean_df: Any, raw_count: int) -> None:
+def validate_silver_data(
+    clean_df: Any,
+    raw_count: int,
+    duplicate_count: int = 0,
+    rejected_count: int = 0,
+) -> None:
     """Kiểm tra các quy tắc nghiệp vụ cốt lõi Data Contract sau bước làm sạch."""
     rules = {
         "Order_ID không rỗng": col("Order_ID").isNotNull(),
@@ -75,12 +95,12 @@ def validate_silver_data(clean_df: Any, raw_count: int) -> None:
             failed.append(f"{rule_name}: {invalid_count} dòng")
 
     clean_count = clean_df.count()
-    rejected_count = raw_count - clean_count
     reject_rate = (rejected_count / raw_count * 100) if raw_count > 0 else 0.0
 
     LOGGER.info(
-        "Thống kê Silver Quality Gate: raw=%d, valid/clean=%d, rejected/quarantine=%d (tỷ lệ reject=%.2f%%)",
+        "Thống kê Silver Quality Gate: raw=%d, duplicate=%d, valid/clean=%d, rejected/quarantine=%d (tỷ lệ reject=%.2f%%)",
         raw_count,
+        duplicate_count,
         clean_count,
         rejected_count,
         reject_rate,
@@ -110,8 +130,11 @@ def clean_and_enrich_silver(
     raw_count = raw_df.count()
     LOGGER.info("Bắt đầu quy trình làm sạch dữ liệu tầng Silver...")
 
-    # Deduplicate theo business grain
-    typed_df = raw_df.dropDuplicates()
+    # Deduplicate theo business grain và tính chính xác số lượng trùng lặp
+    dedup_df = raw_df.dropDuplicates()
+    duplicate_count = raw_count - dedup_df.count()
+    typed_df = dedup_df
+
 
     # Ép kiểu dữ liệu chuẩn
     typed_df = typed_df.withColumn("Order_Date", to_date(col("Order_Date"), "yyyy-MM-dd"))
@@ -214,6 +237,13 @@ def clean_and_enrich_silver(
     clean_df = clean_df.withColumn("Revenue_Per_Order", col("Order_Total_Revenue"))  # Alias tương thích ngược
     clean_df = clean_df.withColumn("Net_Profit", col("Profit") - col("Shipping_Cost"))
 
+    # Định danh duy nhất cho từng dòng sản phẩm trong đơn (Order-Line Grain)
+    if "Order_Line_ID" not in clean_df.columns:
+        w_line = Window.partitionBy("Order_ID").orderBy("Product_Name", "Quantity", "Revenue")
+        clean_df = clean_df.withColumn(
+            "Order_Line_ID", concat_ws("-", col("Order_ID"), row_number().over(w_line))
+        )
+
     clean_df = clean_df.withColumn(
         "Is_Returned", when(col("Order_Status") == "Returned", 1).otherwise(0)
     )
@@ -231,7 +261,12 @@ def clean_and_enrich_silver(
 
     clean_df = clean_df.cache()
     clean_count = clean_df.count()
-    validate_silver_data(clean_df, raw_count)
+    validate_silver_data(
+        clean_df,
+        raw_count=raw_count,
+        duplicate_count=duplicate_count,
+        rejected_count=rejected_count,
+    )
 
     # Ghi nhận chỉ số Data Quality Metrics
     record_pipeline_quality(
@@ -239,9 +274,11 @@ def clean_and_enrich_silver(
         raw_count=raw_count,
         clean_count=clean_count,
         rejected_count=rejected_count,
+        duplicate_count=duplicate_count,
         run_id=run_id,
         batch_id=batch_id,
     )
 
     LOGGER.info("Hoàn tất xử lý Silver Layer với %d dòng bản ghi sạch.", clean_count)
     return clean_df
+

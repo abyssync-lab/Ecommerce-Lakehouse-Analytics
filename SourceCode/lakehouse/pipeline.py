@@ -11,7 +11,7 @@ from typing import Any
 os.environ["PYSPARK_PYTHON"] = sys.executable
 os.environ["PYSPARK_DRIVER_PYTHON"] = sys.executable
 
-from config import SETTINGS, auto_set_spark_home_env
+from config import SETTINGS, PipelineConfig, auto_set_spark_home_env
 
 auto_set_spark_home_env()
 
@@ -89,44 +89,61 @@ def run_delta_demo(spark: SparkSession) -> None:
     LOGGER.info("=== HOÀN TẤT DELTA LAKEHOUSE DEMONSTRATION ===")
 
 
-def run_pipeline(input_path: str | None = None, use_scd2: bool | None = None) -> SparkSession:
+def run_pipeline(
+    input_path: str | None = None,
+    use_scd2: bool | None = None,
+    config: PipelineConfig | None = None,
+) -> SparkSession:
     """Khởi chạy Medallion Lakehouse Pipeline hoàn chỉnh (Bootstrap Full Mode).
 
     Args:
         input_path: Đường dẫn file CSV đầu vào tùy chọn.
-        use_scd2: Bật mô hình hóa SCD Type 2 cho bảng dim_customer (nếu None sẽ đọc từ SETTINGS).
+        use_scd2: Bật mô hình hóa SCD Type 2 cho bảng dim_customer (ưu tiên hơn config/SETTINGS).
+        config: Đối tượng PipelineConfig tập trung nếu có.
 
     Returns:
         SparkSession đã hoàn thành xử lý.
     """
-    if use_scd2 is None:
-        use_scd2 = SETTINGS.use_scd2
+    effective_scd2 = (
+        use_scd2
+        if use_scd2 is not None
+        else (config.use_scd2 if config else SETTINGS.use_scd2)
+    )
+    effective_input = (
+        input_path
+        if input_path is not None
+        else (config.input_path if config else None)
+    )
 
-    run_id = f"run_{uuid.uuid4().hex[:8]}"
-    batch_id = f"batch_{uuid.uuid4().hex[:8]}"
+    run_id = (config.run_id if config and config.run_id else f"run_{uuid.uuid4().hex[:8]}")
+    batch_id = (config.batch_id if config and config.batch_id else f"batch_{uuid.uuid4().hex[:8]}")
 
     LOGGER.info("=====================================================")
     LOGGER.info("BẮT ĐẦU GLOBAL CART INTELLIGENCE LAKEHOUSE PIPELINE")
-    LOGGER.info("Run ID: %s | Batch ID: %s | SCD2: %s", run_id, batch_id, use_scd2)
+    LOGGER.info("Mode: BOOTSTRAP | Run ID: %s | Batch ID: %s | SCD2: %s", run_id, batch_id, effective_scd2)
     LOGGER.info("=====================================================")
 
     spark = create_spark_session()
 
     # 1. RAW INGESTION & 2. BRONZE LAYER (Append-only Raw Delta + Ingestion Metadata)
     LOGGER.info("--- 1. INGESTION & 2. BRONZE LAYER ---")
-    bronze_df = ingest_to_bronze(spark, input_path, mode="overwrite", batch_id=batch_id)
+    bronze_df = ingest_to_bronze(spark, effective_input, mode="overwrite", batch_id=batch_id)
 
     # 3. SILVER LAYER & DATA QUALITY GATE WITH QUARANTINE
     LOGGER.info("--- 3. SILVER LAYER & QUARANTINE ---")
-    quarantine_path = SETTINGS.get_storage_path(SETTINGS.quarantine_delta)
+    quarantine_path = (
+        config.quarantine_path
+        if config and config.quarantine_path
+        else SETTINGS.get_storage_path(SETTINGS.quarantine_delta)
+    )
     clean_df = clean_and_enrich_silver(
         bronze_df, quarantine_path=quarantine_path, run_id=run_id, batch_id=batch_id
     )
     save_and_verify_delta(clean_df, SETTINGS.silver_delta, "silver.ecommerce_clean", mode="overwrite")
 
     # 4. GOLD LAYER - STAR SCHEMA (KIMBALL)
-    LOGGER.info("--- 4. GOLD LAYER - STAR SCHEMA (SCD2=%s) ---", use_scd2)
-    dimensions = build_all_dimensions(spark, clean_df, use_scd2=use_scd2)
+    LOGGER.info("--- 4. GOLD LAYER - STAR SCHEMA (SCD2=%s) ---", effective_scd2)
+    dimensions = build_all_dimensions(spark, clean_df, use_scd2=effective_scd2)
     fact_sales = build_fact_sales(clean_df, dimensions)
 
     star_schema_tables = {**dimensions, "fact_sales": fact_sales}
@@ -138,7 +155,8 @@ def run_pipeline(input_path: str | None = None, use_scd2: bool | None = None) ->
     persist_tables(spark, gold_marts, SETTINGS.gold_marts_base, "gold_mart")
 
     # 6. DEMONSTRATION FEATURES (chỉ chạy khi có cờ cấu hình bật)
-    if SETTINGS.run_delta_demo:
+    run_demo = config.run_delta_demo if config else SETTINGS.run_delta_demo
+    if run_demo:
         run_delta_demo(spark)
 
     LOGGER.info("=====================================================")
@@ -153,20 +171,38 @@ def run_pipeline(input_path: str | None = None, use_scd2: bool | None = None) ->
 
 
 def run_incremental_pipeline(
-    new_batch_df: Any, spark: SparkSession | None = None, batch_id: str | None = None
+    new_batch_df: Any,
+    spark: SparkSession | None = None,
+    batch_id: str | None = None,
+    use_scd2: bool | None = None,
+    config: PipelineConfig | None = None,
 ) -> SparkSession:
     """Thực thi Incremental Ingestion & Delta MERGE INTO từ Bronze -> Silver -> Gold.
 
     Quy trình:
     1. Bronze: Append dữ liệu mới kèm Ingestion Metadata
-    2. Silver: Làm sạch, lọc Quarantine và MERGE INTO theo business grain (Order_ID, Product_Name)
-    3. Gold: Cập nhật Star Schema và refresh Marts
+    2. Silver: Làm sạch, lọc Quarantine và MERGE INTO theo business line grain (Order_ID, Order_Line_ID/Product_Name)
+    3. Gold: Cập nhật Star Schema (bảo toàn SCD2 nếu bật) và deterministic refresh Gold Marts
     """
-    LOGGER.info("--- THỰC THI INCREMENTAL PIPELINE WITH DELTA MERGE ---")
+    effective_scd2 = (
+        use_scd2
+        if use_scd2 is not None
+        else (config.use_scd2 if config else SETTINGS.use_scd2)
+    )
+    bid = (
+        batch_id
+        if batch_id is not None
+        else (config.batch_id if config and config.batch_id else f"inc_batch_{uuid.uuid4().hex[:8]}")
+    )
+    run_id = (config.run_id if config and config.run_id else f"run_{uuid.uuid4().hex[:8]}")
+
+    LOGGER.info("=====================================================")
+    LOGGER.info("THỰC THI INCREMENTAL PIPELINE WITH DELTA MERGE")
+    LOGGER.info("Run ID: %s | Batch ID: %s | SCD2: %s", run_id, bid, effective_scd2)
+    LOGGER.info("=====================================================")
+
     if spark is None:
         spark = create_spark_session()
-
-    bid = batch_id or f"inc_batch_{uuid.uuid4().hex[:8]}"
 
     # 1. Incremental Bronze Append kèm metadata
     enriched_batch = enrich_with_ingestion_metadata(new_batch_df, batch_id=bid)
@@ -175,21 +211,30 @@ def run_incremental_pipeline(
     LOGGER.info("Đã append %d dòng bản ghi mới vào Bronze Delta table (Batch: %s).", new_batch_df.count(), bid)
 
     # 2. Clean & Deduplicate Silver Batch
-    quarantine_path = SETTINGS.get_storage_path(SETTINGS.quarantine_delta)
+    quarantine_path = (
+        config.quarantine_path
+        if config and config.quarantine_path
+        else SETTINGS.get_storage_path(SETTINGS.quarantine_delta)
+    )
     clean_batch = clean_and_enrich_silver(
-        enriched_batch, quarantine_path=quarantine_path, batch_id=bid
+        enriched_batch, quarantine_path=quarantine_path, run_id=run_id, batch_id=bid
     )
 
-    # 3. Delta MERGE INTO Silver theo line item grain
+    # 3. Delta MERGE INTO Silver theo line item grain (Order_Line_ID hoặc fallback Product_Name)
     silver_path = SETTINGS.get_storage_path(SETTINGS.silver_delta)
     if DeltaTable.isDeltaTable(spark, silver_path):
         silver_delta_table = DeltaTable.forPath(spark, silver_path)
+        existing_cols = silver_delta_table.toDF().columns
+        
+        if "Order_Line_ID" in clean_batch.columns and "Order_Line_ID" in existing_cols:
+            merge_cond = "target.Order_ID = source.Order_ID AND target.Order_Line_ID = source.Order_Line_ID"
+        else:
+            merge_cond = "target.Order_ID = source.Order_ID AND target.Product_Name = source.Product_Name"
+
+        LOGGER.info("Thực thi Delta MERGE INTO Silver với điều kiện: %s", merge_cond)
         (
             silver_delta_table.alias("target")
-            .merge(
-                clean_batch.alias("source"),
-                "target.Order_ID = source.Order_ID AND target.Product_Name = source.Product_Name",
-            )
+            .merge(clean_batch.alias("source"), merge_cond)
             .whenMatchedUpdateAll()
             .whenNotMatchedInsertAll()
             .execute()
@@ -198,9 +243,10 @@ def run_incremental_pipeline(
     else:
         save_and_verify_delta(clean_batch, SETTINGS.silver_delta, "silver.ecommerce_clean", mode="append")
 
-    # 4. Refresh Gold Core & Marts từ Silver cập nhật
+    # 4. Refresh Gold Core & Marts từ Silver cập nhật (Deterministic Gold Refresh, bảo toàn SCD2)
+    LOGGER.info("--- 4. REFRESH GOLD CORE & MARTS TỪ SILVER (SCD2=%s) ---", effective_scd2)
     full_silver = spark.read.format("delta").load(silver_path)
-    dimensions = build_all_dimensions(spark, full_silver)
+    dimensions = build_all_dimensions(spark, full_silver, use_scd2=effective_scd2)
     fact_sales = build_fact_sales(full_silver, dimensions)
     persist_tables(spark, {**dimensions, "fact_sales": fact_sales}, SETTINGS.gold_star_schema_base, "gold_star")
 
@@ -209,4 +255,5 @@ def run_incremental_pipeline(
 
     LOGGER.info("--- THÀNH CÔNG: INCREMENTAL PIPELINE HOÀN TẤT ---")
     return spark
+
 

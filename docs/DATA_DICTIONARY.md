@@ -1,69 +1,96 @@
-# Data Dictionary, Data Contract & KPI Definitions
+# Data Dictionary, Data Contracts & KPI Metrics
 
-## 1. Grain & Identifiers
+## 1. Hệ Thống 3 Tầng Data Contracts
 
-- **Grain Silver / FactSales:** Một dòng sản phẩm trong một đơn hàng.
-- `Order_ID`: Mã đơn hàng nghiệp vụ (có thể lặp lại nếu một đơn hàng mua nhiều sản phẩm).
-- `SalesKey`: Surrogate Key duy nhất của từng dòng Fact table (sinh bằng `row_number()`).
-- `DateKey`: Khóa ngày dạng số nguyên `yyyyMMdd` (ví dụ: `20260801`).
+Nền tảng GlobalCart Lakehouse phân định rõ ràng 3 hợp đồng dữ liệu tương ứng với ranh giới xử lý:
 
-## 2. Danh Mục Các Trường Trong Lakehouse
+```
+Source Contract (Landing CSV) ──> Silver Contract (Clean Table) ──> Gold Contract (Warehouse & Marts)
+```
 
-| Nhóm | Trường Tiêu Biểu | Ý Nghĩa & Quy Tắc Ép Kiểu |
-|---|---|---|
-| Thời gian | `Order_Date`, `Year`, `Month`, `Quarter`, `Season` | Thời điểm giao dịch, định dạng Date `yyyy-MM-dd` |
-| Khách hàng | `Customer_ID`, `Customer_Gender`, `Customer_Segment` | Thuộc tính định danh và phân khúc khách hàng |
-| Địa lý | `Region`, `Country` | Thị trường giao dịch bán hàng |
-| Sản phẩm | `Category`, `Sub_Category`, `Product_Name` | Phân cấp danh mục sản phẩm |
-| Tài chính | `Unit_Price`, `Quantity`, `Discount`, `Revenue`, `Cost`, `Profit` | Chỉ số tài chính nguyên bản của từng sản phẩm |
-| Vận chuyển | `Shipping_Cost`, `Shipping_Method`, `Shipping_Days` | Chi phí và số ngày vận chuyển |
-| Trạng thái | `Order_Status`, `Payment_Method` | Trạng thái xử lý đơn (`Delivered`, `Returned`, `Cancelled`) |
+### 1.1. Source Contract (Landing Layer)
+Định nghĩa tại tệp [contracts/ecommerce_order.yaml](../contracts/ecommerce_order.yaml):
+- **Grain:** 1 dòng sản phẩm trong 1 đơn hàng (1 order line item).
+- **Trường bắt buộc (NOT NULL):** `Order_ID`, `Order_Date`, `Customer_ID`, `Product_Name`, `Quantity` ($> 0$), `Unit_Price` ($\ge 0$), `Discount` ($0..1$), `Revenue` ($\ge 0$), `Shipping_Days` ($\ge 0$), `Order_Status`.
+- **Ràng buộc nghiệp vụ:** $Revenue \approx Quantity \times Unit\_Price \times (1 - Discount)$.
 
-## 3. Các Trường Phái Sinh (Enriched Fields ở Silver)
+### 1.2. Silver Contract (Validated Processing Layer)
+- **Kiểu dữ liệu:** Đã ép kiểu chặt chẽ (`Date`, `Double`, `Integer`).
+- **Duy nhất & Nhận diện dòng:** Bổ sung `Order_Line_ID` (kết hợp `Order_ID` và line sequence/hash) phục vụ Delta MERGE INTO idempotent.
+- **Kế toán số lượng:** Bảo toàn $Raw = Valid + Invalid + Duplicate$.
+- **Bảng Quarantine:** Lưu vết các bản ghi lỗi kèm danh sách mảng đa nguyên nhân `rejection_reasons: array<string>`.
 
-| Trường | Công Thức / Logic Chuẩn Hóa |
-|---|---|
-| `Profit_Margin_Percent` | `(Profit / Revenue) * 100` (nếu Revenue != 0, ngược lại 0.0) |
-| `Net_Profit` | `Profit - Shipping_Cost` |
-| `Is_Returned` | 1 nếu `Order_Status == 'Returned'`, ngược lại 0 |
-| `Is_Cancelled` | 1 nếu `Order_Status == 'Cancelled'`, ngược lại 0 |
-| `Delivery_Level` | `Fast` (<= 3 ngày), `Normal` (<= 7 ngày), `Slow` (> 7 ngày) |
+### 1.3. Gold Contract (Certified Analytical Layer)
+- **FactSales Grain:** Chuẩn xác 1 dòng sản phẩm trong 1 đơn hàng, kết nối với 7 Dimensions qua Surrogate Keys.
+- **SCD Type 2 Semantics:** `dim_customer` quản lý lịch sử theo khoảng nửa mở $[ValidFrom, ValidTo)$, đảm bảo đúng 1 bản ghi `Is_Current = 1` cho mỗi khách hàng.
+- **Serving Contract:** Power BI và MongoDB chỉ được phép đọc từ tầng Gold Certified.
 
-## 4. Data Contract Rules & Validation Strategy
+---
 
-| Rule Code | Mô Tả & Điều Kiện Kiểm Tra | Severity | Xử Lý Khi Vi Phạm |
+## 2. Phân Loại Chỉ Số Fact: Additive vs Non-Additive Measures
+
+| Nhóm Measure | Danh Sách Trường | Tính Chất Đại Số | Quy Tắc Tập Hợp & Khuyến Nghị BI |
 |---|---|---|---|
-| `REQUIRED_COLUMNS` | Đủ 13 trường cột bắt buộc trong schema đầu vào | ERROR | Dừng pipeline lập tức |
-| `QUANTITY_POSITIVE` | `Quantity > 0` | ERROR | Đưa bản ghi vào quarantine |
-| `UNIT_PRICE_NON_NEGATIVE` | `Unit_Price >= 0` | ERROR | Đưa bản ghi vào quarantine |
-| `DISCOUNT_RANGE` | `Discount` trong khoảng `[0.0, 1.0]` | ERROR | Đưa bản ghi vào quarantine |
-| `REVENUE_NON_NEGATIVE` | `Revenue >= 0` | ERROR | Đưa bản ghi vào quarantine |
-| `SHIPPING_DAYS_NON_NEGATIVE` | `Shipping_Days >= 0` | ERROR | Đưa bản ghi vào quarantine |
-| `REVENUE_FORMULA_CONSISTENCY` | `|Revenue - (Quantity * Unit_Price * (1 - Discount))| <= 0.05` | WARNING | Log cảnh báo |
-| `ALLOWED_ORDER_STATUS` | `Order_Status` thuộc domain hợp lệ | WARNING | Map thành 'Unknown' hoặc log cảnh báo |
+| **Additive Measures** (Cộng dồn được) | `Quantity`, `Revenue`, `Cost`, `Profit`, `Shipping_Cost` | Có thể cộng gộp theo mọi chiều (Thời gian, Khách hàng, Địa lý, Sản phẩm) | Sử dụng `SUM(...)` trực tiếp trong DAX Power BI hoặc SQL queries. |
+| **Non-Additive Measures** (Không cộng dồn) | `Profit_Margin_Percent` | Tỷ lệ phần trăm biên lợi nhuận của dòng | **Tuyệt đối không dùng `AVG()` các dòng**. Phải tính bằng công thức: $\frac{\sum Profit}{\sum Revenue} \times 100$. |
+| **Repeated Non-Additive Attribute** | `Order_Total_Revenue` | Tổng doanh thu cả đơn hàng, lặp lại trên từng line item | **Tuyệt đối không dùng `SUM(Order_Total_Revenue)`** trên bảng FactSales vì sẽ gây nhân đôi doanh thu. Để phân tích theo đơn, sử dụng `mart_order_summary`. |
 
-## 5. Quy Tắc Phân Tích RFM & Pareto ABC (`analytics_rules.py`)
+---
 
-### RFM Customer Segmentation
-- **Champions:** Recency <= 30 ngày VÀ Frequency >= 3 đơn hàng.
-- **Loyal Customers:** Frequency >= 3 đơn hàng.
-- **At-Risk Customers:** Recency > 90 ngày.
-- **Recent & Casual Customers:** Các trường hợp còn lại.
+## 3. Danh Mục Các Bảng Kimball Star Schema (Gold Core)
 
-### Pareto ABC Product Analysis
-- **Class A (Top 80% Revenue):** Tỷ trọng doanh thu tích lũy *trước* sản phẩm hiện tại `< 80.0%`.
-- **Class B (Next 15% Revenue):** Tỷ trọng doanh thu tích lũy *trước* sản phẩm hiện tại `< 95.0%`.
-- **Class C (Tail 5% Revenue):** Các sản phẩm còn lại.
+### 3.1. FactSales Table (Grain: 1 Order Line)
+- `SalesKey` (Surrogate Key, PK): Khóa đại diện duy nhất sinh bằng `row_number().over(orderBy(...))`.
+- `Order_ID` (Degenerate Dimension): Mã hóa đơn kinh doanh.
+- `Order_Line_ID` (Line Identity): Mã định danh dòng đơn hàng duy nhất.
+- `CustomerKey` (FK): Khóa ngoại trỏ sang `dim_customer` (nối theo khoảng thời gian SCD2).
+- `ProductKey` (FK): Khóa ngoại trỏ sang `dim_product`.
+- `DateKey` (FK): Khóa ngày định dạng số nguyên `yyyyMMdd` (ví dụ: `20260801`).
+- `LocationKey` (FK): Khóa ngoại trỏ sang `dim_location`.
+- `PaymentKey` (FK): Khóa ngoại trỏ sang `dim_payment`.
+- `ShippingKey` (FK): Khóa ngoại trỏ sang `dim_shipping`.
+- `StatusKey` (FK): Khóa ngoại trỏ sang `dim_order_status`.
+- Additive Measures: `Unit_Price`, `Quantity`, `Discount`, `Revenue`, `Cost`, `Profit`, `Shipping_Cost`.
+- Non-Additive Measure: `Profit_Margin_Percent`.
 
-## 6. Công Thức KPI Chuẩn Cho Power BI / Data Marts
+### 3.2. 7 Dimension Tables
+1. **`dim_customer` (SCD Type 2):** `CustomerKey`, `Customer_ID`, `Customer_Gender`, `Customer_Segment`, `ValidFrom`, `ValidTo`, `Is_Current`.
+2. **`dim_product`:** `ProductKey`, `Product_Name`, `Category`, `Sub_Category`.
+3. **`dim_date`:** `DateKey`, `FullDate`, `Year`, `Month`, `Quarter`.
+4. **`dim_location`:** `LocationKey`, `Region`, `Country`.
+5. **`dim_payment`:** `PaymentKey`, `Payment_Method`.
+6. **`dim_shipping`:** `ShippingKey`, `Shipping_Method`, `Delivery_Level`.
+7. **`dim_order_status`:** `StatusKey`, `Order_Status`, `Is_Returned`, `Is_Cancelled`.
 
-| Chỉ Số KPI | Công Thức Khái Niệm | Ghi Chú Tính Toán |
+---
+
+## 4. Danh Mục 12 Gold Data Marts & Phiên Bản Chính Sách
+
+- `mart_overview`: Tổng quan điều hành doanh nghiệp (Doanh thu, Đơn hàng, Lợi nhuận gộp).
+- `mart_order_summary`: Tổng hợp ở mức đơn hàng (Order grain: `Order_ID`, `Total_Items`, `Order_Total_Revenue`).
+- `mart_revenue_by_region`: Doanh thu và lợi nhuận theo khu vực địa lý.
+- `mart_revenue_by_country`: Doanh thu chi tiết theo quốc gia.
+- `mart_revenue_by_category`: Phân tích theo ngành hàng và phân nhóm.
+- `mart_top_products_by_revenue`: Top 10 sản phẩm đóng góp doanh thu cao nhất.
+- `mart_payment_analysis`: Hiệu quả doanh thu theo phương thức thanh toán.
+- `mart_shipping_analysis`: Thời gian giao hàng và chi phí logistics theo phương thức.
+- `mart_order_status_analysis`: Tỷ lệ hoàn thành, hủy đơn và hoàn trả.
+- `mart_monthly_revenue`: Xu hướng doanh thu chuỗi thời gian theo năm và tháng.
+- `mart_customer_segment_analysis`: Giá trị đơn hàng trung bình (AOV) theo phân khúc khách hàng.
+- `mart_rfm_customer_segmentation`: Phân khúc RFM (*Champions, Loyal, At-Risk, Casual*) kèm `Rule_Version = rfm-v1`.
+- `mart_abc_product_analysis`: Phân loại Pareto ABC (*Class A: 80%, Class B: 15%, Class C: 5%*) kèm `Rule_Version = abc-v1`.
+
+---
+
+## 5. Công Thức Đo Lường KPI Chuẩn (DAX / Power BI / SQL)
+
+| Chỉ Số KPI | Công Thức Khái Niệm | Ghi Chú & Lưu Ý Kỹ Thuật |
 |---|---|---|
-| Total Revenue | `SUM(Revenue)` | Tổng doanh thu toàn bộ bản ghi |
-| Total Orders | `DISTINCTCOUNT(Order_ID)` | Không dùng count(Order_ID) để tránh nhân đôi |
-| Total Profit | `SUM(Profit)` | Tổng lợi nhuận gộp |
-| Net Profit | `SUM(Profit) - SUM(Shipping_Cost)` | Lợi nhuận ròng sau chi phí vận chuyển |
-| Profit Margin % | `SUM(Profit) / SUM(Revenue) * 100` | **Không** tính trung bình cộng tỷ lệ dòng |
-| Average Order Value (AOV) | `SUM(Revenue) / DISTINCTCOUNT(Order_ID)` | Giá trị trung bình trên một đơn hàng phân biệt |
-| Return Rate % | `DISTINCTCOUNT(Returned_Orders) / DISTINCTCOUNT(Order_ID) * 100` | Tỷ lệ đơn hàng bị trả lại |
-| Cancellation Rate % | `DISTINCTCOUNT(Cancelled_Orders) / DISTINCTCOUNT(Order_ID) * 100` | Tỷ lệ đơn hàng bị hủy |
+| **Total Revenue** | `SUM(Revenue)` | Tính trên bảng `FactSales` |
+| **Total Orders** | `DISTINCTCOUNT(Order_ID)` | Không dùng `COUNT(Order_ID)` trên FactSales để tránh nhân đôi |
+| **Total Profit** | `SUM(Profit)` | Lợi nhuận gộp toàn hệ thống |
+| **Net Profit** | `SUM(Profit) - SUM(Shipping_Cost)` | Lợi nhuận thực sau khi trừ chi phí vận chuyển |
+| **Profit Margin %** | `(SUM(Profit) / SUM(Revenue)) * 100` | **KPI Hợp đồng**: Không tính trung bình cộng tỷ lệ dòng |
+| **Average Order Value (AOV)** | `SUM(Revenue) / DISTINCTCOUNT(Order_ID)` | Doanh thu trung bình trên mỗi đơn hàng độc lập |
+| **Return Rate %** | `DISTINCTCOUNT(Returned_Orders) / DISTINCTCOUNT(Order_ID) * 100` | Tỷ lệ đơn phát sinh hoàn trả |
+| **Cancellation Rate %** | `DISTINCTCOUNT(Cancelled_Orders) / DISTINCTCOUNT(Order_ID) * 100` | Tỷ lệ đơn bị hủy trước khi giao |

@@ -18,3 +18,14 @@ def test_hdfs_input_path_uses_hdfs_base():
     )
 
     assert settings.get_input_path() == "hdfs://namenode:9000/raw/orders.csv"
+
+
+def test_pipeline_config_defaults():
+    from config import PipelineConfig
+
+    cfg = PipelineConfig(execution_mode="incremental", use_scd2=True, batch_id="B123")
+    assert cfg.execution_mode == "incremental"
+    assert cfg.use_scd2 is True
+    assert cfg.batch_id == "B123"
+    assert cfg.storage_mode == "local"
+

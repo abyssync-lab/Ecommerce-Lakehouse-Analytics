@@ -1,202 +1,212 @@
-# 🌐 GlobalCart Lakehouse Analytics Platform
+# 🌐 GlobalCart Lakehouse Analytics Platform — Incremental PySpark/Delta Data Engineering & BI
 
-### 🚀 Production-Oriented PySpark & Delta Lake Medallion Pipeline | Kimball Star Schema | SCD Type 2 | Data Reconciliation & Serving
+### 🚀 Production-Oriented Ecommerce Lakehouse Architecture | Data Contracts | Quarantine Gate | Kimball Star Schema | SCD Type 2 | Reconciliation Gate & BI Serving
 
-`Apache Spark` · `Delta Lake` · `Hadoop HDFS` · `Hive Metastore` · `MongoDB` · `Power BI` · `Python` · `Pytest` · `YAML Data Contracts`
+`Apache Spark 3.5` · `Delta Lake 3.2` · `Hadoop HDFS` · `Hive Metastore` · `MongoDB` · `Power BI` · `Python 3` · `Pytest` · `YAML Data Contracts`
 
-**GlobalCart Lakehouse Analytics Platform** là một dự án **production-oriented data engineering portfolio** hoàn chỉnh, hiện thực hóa kiến trúc nền tảng dữ liệu hiện đại (**Modern Data Lakehouse Architecture**) phục vụ xử lý giao dịch thương mại điện tử đa quốc gia. Hệ thống xử lý dữ liệu từ nguồn batch & micro-batch, nạp qua mô hình **Medallion Lakehouse (Bronze - Silver - Gold)** với cơ chế kiểm soát chất lượng **Data Quality Gate & Multi-Error Quarantine Table**, mô hình hóa dữ liệu kho theo **Kimball Star Schema (1 Fact, 7 Dimensions, SCD Type 2)**, tạo **12 Data Marts** phân tích chuyên sâu (RFM Segmentation, Pareto ABC) và cung cấp tầng serving đồng nhất cho **Power BI** (qua Hive Thrift Server) và **MongoDB** (Gold-only Operational Serving).
+> **GitHub Description:**
+> *A production-oriented ecommerce lakehouse built with PySpark and Delta Lake, featuring Bronze/Silver/Gold data contracts, quarantine-based data quality, incremental MERGE processing, Kimball dimensional modeling with SCD Type 2, analytical marts, reconciliation tests and BI serving.*
 
 ---
 
 ## 📑 Mục Lục Hệ Thống (Table of Contents)
 
-1. [Business Problem & Mục Tiêu Nghiệp Vụ](#1-business-problem--mục-tiêu-nghiệp-vụ)
-2. [Sơ Đồ Kiến Trúc Hệ Thống (System Architecture)](#2-sơ-đồ-kiến-trúc-hệ-thống-system-architecture)
-3. [Nguồn Dữ Liệu & Định Nghĩa Grain (Source & Data Grain)](#3-nguồn-dữ-liệu--định-nghĩa-grain-source--data-grain)
-4. [Kiến Trúc Pipeline Medallion Canonical](#4-kiến-trúc-pipeline-medallion-canonical)
-5. [Tầng Bronze (Ingestion Metadata & Delta Log)](#5-tầng-bronze-ingestion-metadata--delta-log)
-6. [Tầng Silver & Data Contract Độc Lập](#6-tầng-silver--data-contract-độc-lập)
-7. [Tầng Quarantine & Data Observability](#7-tầng-quarantine--data-observability)
+1. [Problem & Business Context](#1-problem--business-context)
+2. [Canonical Lakehouse Architecture (Sơ Đồ 9 Tầng Chuẩn)](#2-canonical-lakehouse-architecture-sơ-đồ-9-tầng-chuẩn)
+3. [Hệ Thống 3 Tầng Data Contracts](#3-hệ-thống-3-tầng-data-contracts)
+4. [Hai Chế Độ Vận Hành: Bootstrap vs Incremental Processing](#4-hai-chế-độ-vận-hành-bootstrap-vs-incremental-processing)
+5. [Tầng Bronze: Immutable Raw Delta, Ingestion Metadata & Delta Log](#5-tầng-bronze-immutable-raw-delta-ingestion-metadata--delta-log)
+6. [Tầng Silver: Data Quality Gate & Multi-Error Quarantine Table](#6-tầng-silver-data-quality-gate--multi-error-quarantine-table)
+7. [Incremental MERGE, Idempotency & Order-Line Identity](#7-incremental-merge-idempotency--order-line-identity)
 8. [Tầng Gold Core: Mô Hình Kimball Star Schema](#8-tầng-gold-core-mô-hình-kimball-star-schema)
-9. [Xử Lý Chiều Biến Đổi Chậm SCD Type 2 Chuẩn Xác](#9-xử-lý-chiều-biến-đổi-chậm-scd-type-2-chuẩn-xác)
-10. [Tầng Gold Analytics: 12 Data Marts Nghiệp Vụ](#10-tầng-gold-analytics-12-data-marts-nghiệp-vụ)
-11. [Quy Trình Xử Lý: Bootstrap vs Incremental Pipeline](#11-quy-trình-xử-lý-bootstrap-vs-incremental-pipeline)
-12. [Tầng Phục Vụ Dữ Liệu (Serving Layer Architecture)](#12-tầng-phục-vụ-dữ-liệu-serving-layer-architecture)
-13. [Ánh Xạ Semantic Layer Sang Power BI Dashboard](#13-ánh-xạ-semantic-layer-sang-power-bi-dashboard)
-14. [Đối Soát & Bất Biến Dữ Liệu (Data Reconciliation)](#14-đối-soát--bất-biến-dữ-liệu-data-reconciliation)
-15. [Bộ Kiểm Thử Tự Động (Automated Testing Suite)](#15-bộ-kiểm-thử-tự-động-automated-testing-suite)
-16. [Đánh Giá Hiệu Năng & Khả Năng Mở Rộng (Scalability Benchmark)](#16-đánh-giá-hiệu-năng--khả-năng-mở-rộng-scalability-benchmark)
-17. [Sổ Tay Vận Hành CLI (Command Line Operations)](#17-sổ-tay-vận-hành-cli-command-line-operations)
-18. [Cấu Trúc Thư Mục Dự Án (Project Structure)](#18-cấu-trúc-thư-mục-dự-án-project-structure)
-19. [Giới Hạn Hiện Tại & Lộ Trình Phát Triển (Strategic Roadmap)](#19-giới-hạn-hiện-tại--lộ-trình-phát-triển-strategic-roadmap)
+9. [SCD Type 2 Customer History: Thuật Toán Event-Order Transition](#9-scd-type-2-customer-history-thuật-toán-event-order-transition)
+10. [Fact Grain & Phân Loại Additive vs Non-Additive Measures](#10-fact-grain--phân-loại-additive-vs-non-additive-measures)
+11. [Tầng Gold Analytics: 12 Data Marts & Phiên Bản Chính Sách](#11-tầng-gold-analytics-12-data-marts--phiên-bản-chính-sách)
+12. [Đối Soát & Bất Biến Dữ Liệu (Data Reconciliation Gate)](#12-đối-soát--bất-biến-dữ-liệu-data-reconciliation-gate)
+13. [Tầng Phục Vụ BI: Power BI qua Spark Thrift Server & Hive Metastore](#13-tầng-phục-vụ-bi-power-bi-qua-spark-thrift-server--hive-metastore)
+14. [Tầng Phục Vụ Ứng Dụng: MongoDB Secondary Serving Store](#14-tầng-phục-vụ-ứng-dụng-mongodb-secondary-serving-store)
+15. [Delta Lake ACID Transactions & Thử Nghiệm Cô Lập (Isolated Demos)](#15-delta-lake-acid-transactions--thử-nghiệm-cô-lập-isolated-demos)
+16. [Vận Hành & Giám Sát Chất Lượng (Data Observability Table)](#16-vận-hành--giám-sát-chất-lượng-data-observability-table)
+17. [Đánh Giá Hiệu Năng: Synthetic Single-Node Scaling Experiment](#17-đánh-giá-hiệu-năng-synthetic-single-node-scaling-experiment)
+18. [Chiến Lược Kiểm Thử Tự Động (Automated Testing Suite)](#18-chiến-lược-kiểm-thử-tự-động-automated-testing-suite)
+19. [Giới Hạn Hiện Tại & Ranh Giới Kỹ Thuật (Production Boundary)](#19-giới-hạn-hiện-tại--ranh-giới-kỹ-thuật-production-boundary)
+20. [Lộ Trình Chiến Lược (Strategic Roadmap) & CV Placement](#20-lộ-trình-chiến-lược-strategic-roadmap--cv-placement)
 
 ---
 
-## 1. Business Problem & Mục Tiêu Nghiệp Vụ
+## 1. Problem & Business Context
 
-Trong môi trường thương mại điện tử toàn cầu quy mô lớn, các tổ chức thường đối mặt với 5 thách thức cốt lõi:
-- **Dữ liệu thô phân tán và thiếu tính toàn vẹn:** Đơn hàng từ nhiều thị trường gặp lỗi âm đơn giá, chiết khấu vượt mức $100\%$, thiếu mã đơn, thời gian giao hàng không hợp lý.
-- **Rủi ro nhân đôi doanh thu khi khách hàng đổi thông tin:** Khi thuộc tính nhân khẩu học (Phân khúc, Vùng) thay đổi, join dimension thông thường làm nhân bản dòng Fact bán hàng.
-- **Bất đồng bộ số liệu giữa BI và ứng dụng vận hành:** Báo cáo Power BI hiển thị một số, trong khi MongoDB phục vụ microservice hiển thị số khác nếu truy vấn trực tiếp từ các tầng chưa chuẩn hóa.
-- **Khó khăn trong truy vết và audit lỗi:** Khi phát hiện số liệu sai, đội ngũ kỹ sư dữ liệu không thể xác định bản ghi đến từ batch nào, file nào và vi phạm những luật nghiệp vụ nào.
-- **Chi phí điện toán cao khi phải re-run toàn bộ:** Cần một pipeline hỗ trợ nạp tăng tiến (**Incremental Ingestion**) và hợp nhất dữ liệu (**Delta MERGE INTO**) thay vì batch overwrite định kỳ.
+Trong môi trường thương mại điện tử đa quốc gia quy mô lớn, các tổ chức dữ liệu thường đối mặt với 5 thách thức cốt lõi:
+- **Dữ liệu thô phân tán và vi phạm chất lượng:** File giao dịch chứa đơn giá âm, chiết khấu vượt quá $100\%$, mã đơn hàng bị khuyết thiếu hoặc thời gian giao hàng bất hợp lý.
+- **Rủi ro nhân đôi doanh thu khi khách hàng đổi thông tin:** Khi thuộc tính nhân khẩu học (Phân khúc, Vùng) thay đổi, join dimension thông thường làm nhân bản dòng Fact bán hàng nếu không có cơ chế SCD Type 2 chuẩn xác.
+- **Bất đồng bộ số liệu giữa BI và ứng dụng vận hành:** Báo cáo Power BI hiển thị một số, trong khi MongoDB phục vụ microservice hiển thị số khác do truy vấn trực tiếp từ các tầng xử lý chưa được kiểm toán.
+- **Khó khăn trong audit và truy vết:** Khi phát hiện số liệu sai lệch, đội ngũ kỹ sư không thể xác định bản ghi đến từ batch nào, file nguồn nào và vi phạm những luật nghiệp vụ nào.
+- **Chi phí điện toán cao khi phải full rebuild toàn bộ:** Cần phân tách rành mạch cơ chế nạp tăng tiến (**Incremental Ingestion & Silver MERGE**) với việc làm mới có định hướng tầng Gold.
 
-**Mục tiêu của GlobalCart:** Xây dựng một Lakehouse Platform khép kín, phân tách rành mạch trách nhiệm từng tầng dữ liệu, áp dụng kiểm định chất lượng theo hợp đồng (**Data Contract**), duy trì nguồn chân lý duy nhất (**Single Source of Truth** từ Gold Core) và bảo đảm tính bất biến số liệu (**Data Reconciliation**).
+**Sứ mệnh của GlobalCart:** Hiện thực hóa một nền tảng Data Lakehouse production-oriented chuẩn mực theo trục:
+$$\text{Data Contracts} \longrightarrow \text{Incremental MERGE} \longrightarrow \text{Dimensional History} \longrightarrow \text{Reconciliation} \longrightarrow \text{Certified Serving} \longrightarrow \text{Observability}$$
 
 ---
 
-## 2. Sơ Đồ Kiến Trúc Hệ Thống (System Architecture)
+## 2. Canonical Lakehouse Architecture (Sơ Đồ 9 Tầng Chuẩn)
 
-Kiến trúc chuẩn hóa canonical duy nhất xuất hiện xuyên suốt nền tảng:
+Kiến trúc duy nhất xuất hiện đồng nhất xuyên suốt mã nguồn, tài liệu, bài phỏng vấn và CV:
 
-```mermaid
-flowchart TD
-    subgraph S1["1. DATA SOURCES"]
-        A["Batch CSV / Micro-batch Ingestion<br/>(Data/EcommerceSalesDataset.csv)"]
-    end
-    
-    subgraph S2["2. INGESTION & DATA CONTRACT"]
-        B["Schema / File Validation<br/>contracts/ecommerce_order.yaml"]
-    end
-    
-    subgraph S3["3. BRONZE LAYER (DELTA)"]
-        C["Bronze Delta Table (/ecommerce/bronze)<br/>• Immutable Raw Delta<br/>• Ingestion Metadata (_ingested_at, _source_file, _batch_id, _record_hash)<br/>• Delta Transaction Log (_delta_log)"]
-    end
-    
-    subgraph S4["4. SILVER LAYER & DATA QUALITY GATE"]
-        D["Type Casting, Deduplication & Normalization"]
-        Q{"Data Quality Gate<br/>Contract Checks"}
-        SILVER["Silver Delta (/ecommerce/silver)<br/>Clean Valid Records (Line-Item Grain)"]
-        QUAR["Quarantine Delta (/ecommerce/quarantine)<br/>Multi-error reasons array & timestamp"]
-    end
-    
-    subgraph S5["5. GOLD CORE WAREHOUSE"]
-        STAR["Kimball Star Schema (/ecommerce/gold/star_schema)<br/>├── FactSales (Grain: 1 Product Line in 1 Order)<br/>├── DimCustomer (SCD Type 2 Change Detection)<br/>├── DimProduct, DimDate, DimLocation<br/>└── DimPayment, DimShipping, DimOrderStatus"]
-    end
-    
-    subgraph S6["6. GOLD ANALYTICS"]
-        MARTS["12 Data Marts (/ecommerce/gold/marts)<br/>Revenue, RFM Segmentation, ABC Pareto, Geography..."]
-        MON["Data Observability Table<br/>/ecommerce/gold/monitoring/pipeline_quality"]
-    end
-    
-    subgraph S7["7. SERVING LAYER"]
-        HIVE["Catalog: Hive Metastore<br/>Query Engine: Spark Thrift Server"]
-        PBI["Power BI Dashboard DirectQuery / ODBC"]
-        MONGO["MongoDB Serving Collections (Gold-only)<br/>Operational Views: RFM, ABC, Marts"]
-    end
+```
+                         CONTROL PLANE
+Pipeline Config ──> Batch Registry ──> Data Contracts ──> Run Metadata / Audit
+                               │
+                               ▼
+                         DATA PLANE
 
-    A --> B --> C --> D --> Q
-    Q -->|Valid| SILVER
-    Q -->|Invalid| QUAR
-    SILVER --> STAR
-    STAR --> MARTS
-    SILVER -.-> MON
-    STAR --> HIVE
-    MARTS --> HIVE
-    HIVE --> PBI
-    MARTS --> MONGO
+1. RAW INGESTION & DATA CONTRACTS
+   Historical CSV / Micro-batch CSV / Future: Kafka & CDC
+   Schema contract (contracts/ecommerce_order.yaml)
+   Batch identity, ingestion timestamp, source file hash
+                               │
+                               ▼
+2. BRONZE LAYER (IMMUTABLE RAW DELTA)
+   Raw source columns preserved
+   System metadata: _batch_id, _ingested_at, _source_file, _source_hash, _record_hash
+   Transaction log: _delta_log (ACID audit trail)
+                               │
+                               ▼
+3. SILVER LAYER (DATA QUALITY GATE & QUARANTINE)
+   Cast schema, normalize, derived business metrics
+   Accounting Invariant: Raw = Valid + Invalid + Duplicate
+               │
+        ┌──────┴──────┐
+        ▼             ▼
+     VALID         INVALID
+        │             │
+        │      QUARANTINE TABLE
+        │      - rejection_reasons: array<string>
+        │      - batch_id, rejected_at
+        ▼
+4. SILVER MERGE / CDC CONTRACT
+   Business Line Key: Order_ID + Order_Line_ID
+   Delta MERGE INTO (whenMatchedUpdateAll, whenNotMatchedInsertAll)
+   Idempotent batch processing
+               │
+               ▼
+5. GOLD CORE MODEL (KIMBALL STAR SCHEMA)
+   FactSales (Grain: 1 order line, Degenerate Dim: Order_ID)
+   DimCustomer (SCD Type 2 Event-Order Change Detection [ValidFrom, ValidTo))
+   DimProduct, DimDate, DimLocation, DimPayment, DimShipping, DimOrderStatus
+               │
+               ▼
+6. GOLD ANALYTICAL MARTS
+   12 Data Marts + mart_order_summary (Order grain)
+   RFM Customer Segmentation (Rule version: rfm-v1)
+   Pareto ABC Product Analysis (Rule version: abc-v1)
+               │
+               ▼
+7. DATA RECONCILIATION GATE
+   Revenue Invariant: Sum(Silver) = Sum(Fact) = Overview Mart
+   Row Conservation: Raw = Valid + Invalid + Duplicate
+   Fact Grain Uniqueness: Count(Fact) = Distinct(SalesKey)
+   Foreign Key Completeness: Zero Orphan Keys
+   SCD2 Temporal Integrity: Exactly one Is_Current = 1 per customer
+               │
+               ▼
+8. SERVING LAYER (GOLD-ONLY CONTRACT)
+   ├── Hive Metastore / Spark Thrift Server ──> Power BI (ODBC/DirectQuery)
+   └── Certified Gold Marts ──────────────────> MongoDB BSON Collections
+               │
+               ▼
+9. OPERATIONS & OBSERVABILITY
+   pipeline_quality Delta table (raw, duplicate, valid, quarantined rows, reject rate %)
+   System Doctor CLI & JSON audit run reports
 ```
 
 ---
 
-## 3. Nguồn Dữ Liệu & Định Nghĩa Grain (Source & Data Grain)
+## 3. Hệ Thống 3 Tầng Data Contracts
 
-### Định Nghĩa Grain Chính Thức
-Một trong những nguyên tắc quan trọng nhất của kỹ sư dữ liệu là định nghĩa rõ ràng **Grain (mức độ chi tiết)** của từng tầng dữ liệu để tránh tính trùng số liệu:
+Toàn bộ quy chuẩn về kiểu dữ liệu, tính nullable và biên giá trị được cấu hình độc lập tại tệp [contracts/ecommerce_order.yaml](contracts/ecommerce_order.yaml):
 
-> [!IMPORTANT]
-> **Quy Tắc Grain Toàn Hệ Thống:**
-> - **Silver Grain:** Đúng **1 dòng sản phẩm trong 1 đơn hàng (1 product line item within 1 customer order)**.
-> - **FactSales Grain:** Đúng **1 dòng sản phẩm trong 1 đơn hàng**, kết nối với 7 Dimensions qua Surrogate Keys.
-> - **Cột `Order_Total_Revenue` trong Silver:** Thể hiện tổng doanh thu cả đơn hàng, được lặp lại trên từng line item để phục vụ truy vấn lọc theo đơn. **Cảnh báo:** Tuyệt đối không được tính `SUM(Order_Total_Revenue)` trực tiếp mà không deduplicate `Order_ID`.
-
-### Các Trường Dữ Liệu Nguồn Cốt Lõi
-- **Định danh nghiệp vụ:** `Order_ID` (Degenerate Dimension), `Customer_ID`, `Product_Name`.
-- **Thời gian giao dịch:** `Order_Date` (yyyy-MM-dd), `Year`, `Month`.
-- **Chỉ số đo lường (Measures):** `Quantity` (int > 0), `Unit_Price` (double >= 0), `Discount` (0..1), `Revenue` (double >= 0), `Cost`, `Profit`, `Shipping_Cost`, `Shipping_Days` (int >= 0).
-- **Phân loại nghiệp vụ:** `Category`, `Sub_Category`, `Order_Status`, `Payment_Method`, `Shipping_Method`, `Region`, `Country`.
+1. **Source Contract (Landing Layer):** Định nghĩa schema tiếp nhận thô (26 trường thuộc tính) và các ràng buộc nghiệp vụ tối thiểu.
+2. **Silver Contract (Processing Layer):** Dữ liệu sạch, ép kiểu chính xác, chuẩn hóa chuỗi, gán `Order_Line_ID` định danh duy nhất cho từng dòng đơn và phân lập lỗi vào mảng `rejection_reasons`.
+3. **Gold Contract (Certified Serving Layer):** FactSales theo đúng grain 1 dòng sản phẩm trong 1 đơn; `dim_customer` SCD Type 2 bảo đảm khoảng thời gian $[ValidFrom, ValidTo)$ liên tục, không chồng lấn.
 
 ---
 
-## 4. Kiến Trúc Pipeline Medallion Canonical
+## 4. Hai Chế Độ Vận Hành: Bootstrap vs Incremental Processing
 
-Hệ thống phân chia ranh giới vật lý và logic rõ ràng qua 4 tầng:
+Hệ thống phân tách rành mạch hai chế độ thực thi qua `PipelineConfig`:
 
-| Tầng Dữ Liệu | Công Nghệ Lưu Trữ | Vai Trò Kỹ Thuật | Đường Dẫn Mặc Định |
-|---|---|---|---|
-| **Landing / Source** | Local CSV / POSIX File | Nơi tiếp nhận file CSV thô ban đầu từ các nguồn micro-batch | `Data/EcommerceSalesDataset.csv` |
-| **Bronze Layer** | Delta Lake (Append-only) | Đại diện số hóa dạng Delta của nguồn dữ liệu, lưu vết `_delta_log` và metadata | `/ecommerce/bronze/ecommerce_raw_delta` |
-| **Silver Layer** | Delta Lake (ACID Table) | Dữ liệu sạch, chuẩn hóa kiểu, deduplicate, áp dụng Data Contract | `/ecommerce/silver/ecommerce_clean_delta` |
-| **Quarantine** | Delta Lake (Error Log) | Phân lập toàn bộ bản ghi vi phạm hợp đồng dữ liệu kèm danh sách mã lỗi | `/ecommerce/quarantine/rejected_rows` |
-| **Gold Core** | Delta Lake (Star Schema) | Kho dữ liệu chuẩn Kimball gồm 1 bảng Fact chi tiết và 7 bảng Dimension (SCD2) | `/ecommerce/gold/star_schema/*` |
-| **Gold Marts** | Delta Lake (Data Marts) | 12 bảng tổng hợp phục vụ dashboard phân tích và ứng dụng vận hành | `/ecommerce/gold/marts/*` |
-| **Monitoring** | Delta Lake (Observability) | Lưu vết số lượng dòng nạp, hợp lệ, bị reject và tỷ lệ lỗi qua từng đợt chạy | `/ecommerce/gold/monitoring/pipeline_quality` |
+| Tiêu Chí Kỹ Thuật | 1. Bootstrap Mode (Full Refresh) | 2. Incremental Mode (Micro-batch MERGE) |
+|---|---|---|
+| **Mục đích** | Khởi tạo kho dữ liệu từ đầu, nạp lịch sử hoặc chạy lại toàn bộ | Nạp định kỳ các batch giao dịch mới với chi phí tài nguyên tối ưu |
+| **Bronze Layer** | Ghi đè (`mode="overwrite"`) | Ghi tiếp (`mode="append"`) kèm `_batch_id` và `_source_hash` |
+| **Silver Layer** | Ép kiểu, làm sạch, ghi đè Silver Delta | Làm sạch batch mới, **Delta MERGE INTO** theo `(Order_ID, Order_Line_ID)` |
+| **Quarantine** | Ghi đè / nạp mới | Ghi tiếp (`mode="append"`) các bản ghi lỗi của batch mới |
+| **Gold Core** | Rebuild toàn bộ 7 Dimensions & FactSales | Rebuild xác định (*Deterministic Gold Refresh*) bảo toàn SCD2 |
+| **Gold Marts** | Tính toán lại toàn bộ 12 Marts | Làm mới các Marts từ bảng Silver/Fact đã cập nhật |
+| **Lệnh Vận Hành CLI** | `globalcart pipeline bootstrap --scd2` | `globalcart pipeline incremental --input batch.csv --batch-id B01 --scd2` |
+
+> [!NOTE]
+> **Định vị chính xác về Gold:** Incremental Pipeline tại đây thực hiện:
+> *Incremental Bronze append $\to$ Incremental Silver MERGE $\to$ Deterministic Gold refresh*.
+> Điều này đảm bảo tính toàn vẹn 100% của toàn bộ 12 Marts và lịch sử SCD2 mà không gây sai lệch số liệu.
 
 ---
 
-## 5. Tầng Bronze (Ingestion Metadata & Delta Log)
+## 5. Tầng Bronze: Immutable Raw Delta, Ingestion Metadata & Delta Log
 
-Khác biệt với việc chỉ copy file CSV sang định dạng Parquet thông thường, tầng Bronze của GlobalCart được nâng cấp để hỗ trợ **truy vết (traceability), dòng đời dữ liệu (lineage), khả năng phát lại (replay)** và **kiểm soát nạp tăng tiến**:
+Khác biệt với việc chỉ copy file CSV sang định dạng Parquet, tầng Bronze của GlobalCart được nâng cấp để hỗ trợ **truy vết (traceability), dòng đời dữ liệu (lineage), khả năng phát lại (replay)** và **kiểm soát idempotency**:
 
-Mỗi bản ghi được bổ sung 5 trường siêu dữ liệu hệ thống:
+Mỗi bản ghi được bổ sung 6 trường siêu dữ liệu hệ thống:
 - `_ingested_at`: Timestamp hệ thống chính xác tại thời điểm ghi vào Bronze Delta.
-- `_source_file`: Tên URI file nguồn gốc ban đầu (sử dụng `input_file_name()`).
-- `_batch_id`: Mã nhận diện batch chạy (`run_id` / `batch_id`).
+- `_source_file`: Đường dẫn file CSV nguồn gốc ban đầu (sử dụng `input_file_name()`).
+- `_batch_id`: Mã nhận diện batch / run ingestion.
 - `_source_system`: Nguồn phát sinh dữ liệu (ví dụ: `ecommerce_csv`).
-- `_record_hash`: Mã băm SHA-256 trên toàn bộ thuộc tính nghiệp vụ để kiểm tra toàn vẹn và chống trùng lặp.
+- `_source_hash`: Mã băm SHA-256 của file nguồn đầu vào phục vụ batch registry idempotency.
+- `_record_hash`: Mã băm SHA-256 trên toàn bộ thuộc tính nghiệp vụ để kiểm tra toàn vẹn bản ghi.
+- `_pipeline_version`: Phiên bản pipeline nạp dữ liệu (`1.0.0`).
 
 Mọi giao dịch ghi vào Bronze đều được bảo vệ bởi **Delta Lake Transaction Log (`_delta_log`)**, hỗ trợ tính năng khôi phục và audit lịch sử giao dịch.
 
 ---
 
-## 6. Tầng Silver & Data Contract Độc Lập
+## 6. Tầng Silver: Data Quality Gate & Multi-Error Quarantine Table
 
-### Tách Biệt Data Contract Khỏi Logic Xử Lý
-Toàn bộ quy chuẩn về kiểu dữ liệu, tính nullable và biên giá trị được cấu hình độc lập tại tệp [contracts/ecommerce_order.yaml](contracts/ecommerce_order.yaml):
+### 1. Kế Toán Số Dòng Chuẩn Xác (Conservation Invariant)
+Khác với các triển khai ETL thông thường gộp chung bản ghi trùng lặp vào danh sách lỗi, GlobalCart tách biệt rành mạch:
+$$\text{Raw Count} = \text{Clean Valid Count} + \text{Quarantined Count} + \text{Duplicate Count}$$
 
-```yaml
-version: "1.0.0"
-dataset: "ecommerce_order"
-grain: "one product line item within one customer order"
+- `duplicate_count`: Các dòng trùng lặp y hệt ở tầng nguồn được lọc sạch bằng `dropDuplicates()`.
+- `quarantine_count`: Các dòng vi phạm Data Quality Gate được phân lập vào bảng Delta Quarantine riêng biệt.
 
-columns:
-  Order_ID: { type: "string", nullable: false }
-  Quantity: { type: "integer", nullable: false, min: 1 }
-  Unit_Price: { type: "double", nullable: false, min: 0.0 }
-  Discount: { type: "double", nullable: false, min: 0.0, max: 1.0 }
-  Revenue: { type: "double", nullable: false, min: 0.0 }
-  Shipping_Days: { type: "integer", nullable: false, min: 0 }
-  Order_Status:
-    type: "string"
-    allowed_values: ["Delivered", "Returned", "Cancelled", "Processing", "Shipped"]
-```
-
-### Pipeline Xử Lý Tại Tầng Silver
-1. **Deduplication:** Loại bỏ các bản ghi trùng lặp ở tầng nguồn.
-2. **Schema Casting:** Ép kiểu chính xác cho toàn bộ các trường số học, ngày tháng và chuỗi.
-3. **Derived Metrics:**
-   - `Net_Profit = Profit - Shipping_Cost`
-   - `Delivery_Level`: Fast ($\le 3$ ngày), Normal ($4..7$ ngày), Slow ($> 7$ ngày).
-   - `Order_Total_Revenue`: Tổng doanh thu theo từng `Order_ID` (kèm grain caveat).
-4. **Data Quality Gate:** Đánh giá hợp lệ đồng thời điều kiện null và ràng buộc giá trị nghiệp vụ.
-
----
-
-## 7. Tầng Quarantine & Data Observability
-
-### Multi-Error Quarantine Tracking
-Trong các kiến trúc cũ, việc dùng chuỗi `.when().when()` khiến bản ghi vi phạm nhiều lỗi cùng lúc (ví dụ vừa `Quantity <= 0` vừa `Discount > 1`) chỉ ghi nhận được lý do đầu tiên. 
-
-Tầng Quarantine của GlobalCart theo dõi **đa lỗi vi phạm**:
-- `rejection_reasons`: Danh sách mảng chuỗi `array<string>` ghi nhận toàn bộ các điều kiện bị vi phạm (ví dụ: `["INVALID_QUANTITY", "INVALID_DISCOUNT"]`).
+### 2. Multi-Reason Quarantine Tracking
+Thay vì chỉ lưu 1 lỗi đầu tiên gặp phải, tầng Quarantine lưu vết **toàn bộ danh sách các điều kiện bị vi phạm**:
+- `rejection_reasons`: Danh sách mảng chuỗi `array<string>` (ví dụ: `["INVALID_QUANTITY", "INVALID_DISCOUNT"]`).
 - `rejection_reason`: Chuỗi nối phân tách bằng dấu chấm phẩy phục vụ hiển thị báo cáo tabular.
 - `rejected_at`: Thời gian bị cách ly vào bảng Quarantine.
 
-### Bảng Giám Sát Chất Lượng (`gold_monitoring.pipeline_quality`)
-Mỗi lần pipeline thực thi, số liệu tổng quan về chất lượng được lưu tự động vào Delta table:
-- `run_id`, `batch_id`, `raw_rows`, `valid_rows`, `rejected_rows`, `reject_rate_percent`, `recorded_at`.
+---
 
-Giúp kỹ sư dữ liệu thiết lập cảnh báo chủ động khi tỷ lệ reject vượt ngưỡng cho phép (SLA).
+## 7. Incremental MERGE, Idempotency & Order-Line Identity
+
+### 1. Khóa MERGE Cấp Dòng (Line-Item Identity)
+Nếu chỉ MERGE theo `(Order_ID, Product_Name)`, khi một đơn hàng có nhiều dòng mua cùng một sản phẩm (ví dụ dòng 1 mua quà tặng kèm, dòng 2 mua hàng trả phí), phép MERGE sẽ bị conflation (xung đột dữ liệu).
+
+GlobalCart giải quyết triệt để bằng cách tạo **`Order_Line_ID`** ổn định:
+$$\text{Order\_Line\_ID} = \text{Order\_ID} + \text{"-"} + \text{row\_number().over(Window.partitionBy("Order\_ID").orderBy("Product\_Name", "Quantity"))}$$
+
+Khi thực thi Delta MERGE INTO:
+```sql
+MERGE INTO silver.ecommerce_clean AS target
+USING clean_batch AS source
+ON target.Order_ID = source.Order_ID AND target.Order_Line_ID = source.Order_Line_ID
+WHEN MATCHED THEN UPDATE SET *
+WHEN NOT MATCHED THEN INSERT *
+```
+
+### 2. Batch Registry & Idempotency
+Hệ thống lưu vết từng batch vào bảng Delta `ingestion_batches_delta`:
+- `batch_id`, `source_hash`, `row_count`, `status`, `registered_at`.
+- Khi nạp lại cùng một batch, hệ thống đối soát hash để tránh nhân đôi dữ liệu.
 
 ---
 
@@ -215,267 +225,247 @@ DimCustomer ────────── FactSales ─────────
                           │
                      DimShipping
                           │
-                   DimOrderStatus
+                    DimOrderStatus
 ```
 
-### Chi Tiết 7 Bảng Dimension & 1 Bảng Fact:
-1. **`FactSales`:** Grain: 1 dòng sản phẩm trong 1 đơn hàng.
+### 1 Bảng Fact & 7 Bảng Dimension:
+1. **`FactSales`:** Grain: **1 dòng sản phẩm trong 1 đơn hàng (1 order line)**.
    - Foreign Keys: `CustomerKey`, `ProductKey`, `DateKey`, `LocationKey`, `PaymentKey`, `ShippingKey`, `StatusKey`.
-   - Degenerate Dimension: `Order_ID`.
+   - Degenerate Dimension: `Order_ID`, `Order_Line_ID`.
    - Measures: `Unit_Price`, `Quantity`, `Discount`, `Revenue`, `Cost`, `Profit`, `Profit_Margin_Percent`, `Shipping_Cost`.
-2. **`DimCustomer`:** Quản lý theo SCD Type 2 (`CustomerKey`, `Customer_ID`, `Customer_Gender`, `Customer_Segment`, `ValidFrom`, `ValidTo`, `Is_Current`).
+2. **`DimCustomer` (SCD Type 2):** Quản lý lịch sử biến đổi của khách hàng.
 3. **`DimProduct`:** `ProductKey`, `Product_Name`, `Category`, `Sub_Category`.
-4. **`DimDate`:** `DateKey` (yyyyMMdd), `FullDate`, `Year`, `Month`, `Quarter`.
+4. **`DimDate`:** `DateKey` (`yyyyMMdd`), `FullDate`, `Year`, `Month`, `Quarter`.
 5. **`DimLocation`:** `LocationKey`, `Region`, `Country`.
 6. **`DimPayment`:** `PaymentKey`, `Payment_Method`.
 7. **`DimShipping`:** `ShippingKey`, `Shipping_Method`, `Delivery_Level`.
 8. **`DimOrderStatus`:** `StatusKey`, `Order_Status`, `Is_Returned`, `Is_Cancelled`.
 
-### Chiến Lược Khóa Đại Diện (Surrogate Key Strategy)
-Thay vì sử dụng hàm sinh số không xác định như `monotonically_increasing_id()`, hệ thống sử dụng thuật toán sắp xếp theo khóa tự nhiên kết hợp `row_number().over(Window.orderBy(...))` để đảm bảo tính tái lập (reproducibility) trong các đợt build dimension.
+### Chiến Lược Khóa Đại Diện (Surrogate Key Policy)
+- **Portfolio Deterministic Rebuild Key:** Sử dụng `row_number().over(Window.orderBy(*order_cols))` sắp xếp theo khóa tự nhiên nghiệp vụ để bảo đảm 100% khả năng tái lập (reproducibility) khi re-run pipeline.
+- **Enterprise Persistent Key (Kiến trúc tham chiếu):** Trong kho dữ liệu production lâu dài nhiều năm, kiến trúc khuyến nghị sử dụng Stateful Dimension Lookup kết hợp monotonic sequence hoặc generated hash key để không bao giờ thay đổi surrogate key đã cấp trong quá khứ.
 
 ---
 
-## 9. Xử Lý Chiều Biến Đổi Chậm SCD Type 2 Chuẩn Xác
+## 9. SCD Type 2 Customer History: Thuật Toán Event-Order Transition
 
-### Xử Lý Lỗi State Flip ($A \to B \to A$)
-Nếu chỉ sử dụng `groupBy(Customer_ID, attributes)` để lấy `min(Order_Date)` làm `ValidFrom`, khi một khách hàng chuyển đổi trạng thái từ *Segment A* sang *Segment B* rồi sau đó quay trở lại *Segment A*, hai giai đoạn của Segment A sẽ bị gộp làm một, làm sai lệch lịch sử.
+### Xử Lý Lỗi Kinh Điển State Flip ($A \to B \to A$)
+Nếu chỉ sử dụng `groupBy(Customer_ID, attributes).agg(min(Order_Date))` như cách làm sơ khai, khi khách hàng đổi từ *Consumer* $\to$ *Corporate* rồi quay lại *Consumer*, hai giai đoạn Consumer sẽ bị gộp làm một, làm mất hoàn toàn lịch sử giai đoạn giữa.
 
 GlobalCart áp dụng giải thuật **Event-Ordered Change Detection**:
 ```
-Giao dịch khách hàng sắp xếp theo ngày
-                  ↓
-       lag() trên các thuộc tính
-                  ↓
-      Phát hiện sự kiện thay đổi
-(is_change = 1 nếu giá trị khác bản ghi trước)
-                  ↓
-   Cumulative sum gán change_group
-                  ↓
-      ValidFrom = min(Order_Date)
-                  ↓
-       lead(ValidFrom) → ValidTo
+Giao dịch khách hàng sắp xếp theo thời gian: (Customer_ID, Order_Date, Order_ID)
+                                ↓
+                 lag() trên các thuộc tính nhân khẩu
+                                ↓
+                   Phát hiện sự kiện thay đổi
+     is_change = 1 (khi giá trị hiện tại != giá trị trước đó)
+                                ↓
+      Cumulative sum trên is_change tạo change_group (Island Grouping)
+                                ↓
+         Mỗi (Customer_ID, change_group) tạo 1 phiên bản độc lập
+                       ValidFrom = min(Order_Date)
+                                ↓
+          lead(ValidFrom) → ValidTo (mặc định 9999-12-31)
+                 Is_Current = 1 cho phiên bản mới nhất
 ```
 
-Kết quả tạo ra các khoảng thời gian nửa mở $[ValidFrom, ValidTo)$ liên tục, không chồng lấn, và bảo đảm đúng $1$ bản ghi hiện hành (`Is_Current = 1`) cho mỗi khách hàng.
+**Kết quả:**
+- Khách hàng có chuỗi $A \to B \to A$ tạo đúng **3 phiên bản riêng biệt**.
+- Các khoảng thời gian $[ValidFrom, ValidTo)$ nửa mở, liên tục, không chồng lấn.
+- Luôn bảo đảm đúng **1 bản ghi `Is_Current = 1`** cho mỗi khách hàng.
 
 ---
 
-## 10. Tầng Gold Analytics: 12 Data Marts Nghiệp Vụ
+## 10. Fact Grain & Phân Loại Additive vs Non-Additive Measures
 
-Tầng Gold Marts tổng hợp các lát cắt kinh doanh quan trọng:
-1. `mart_overview`: Chỉ số điều hành tổng quan (Doanh thu, Lợi nhuận, Đơn hàng, Biên lợi nhuận trung bình).
-2. `mart_revenue_by_region`: Doanh thu & lợi nhuận theo vùng địa lý.
-3. `mart_revenue_by_country`: Doanh thu chi tiết theo từng quốc gia.
-4. `mart_revenue_by_category`: Phân tích cơ cấu ngành hàng và nhóm sản phẩm.
-5. `mart_top_products_by_revenue`: Top 10 sản phẩm đóng góp doanh thu lớn nhất.
-6. `mart_payment_analysis`: Hiệu quả doanh thu theo phương thức thanh toán.
-7. `mart_shipping_analysis`: Tốc độ giao hàng trung bình và chi phí vận chuyển.
-8. `mart_order_status_analysis`: Tỷ lệ hoàn thành đơn, đơn hủy và đơn hoàn trả.
-9. `mart_monthly_revenue`: Xu hướng tăng trưởng doanh thu theo chuỗi thời gian tháng.
-10. `mart_customer_segment_analysis`: Giá trị đơn hàng trung bình (AOV) theo phân khúc khách hàng.
-11. `mart_rfm_customer_segmentation`: Phân khúc khách hàng rule-based RFM (*Champions, Loyal, At-Risk, Casual*).
-12. `mart_abc_product_analysis`: Phân tích Pareto ABC phân loại danh mục sản phẩm (Class A: top 80%, Class B: next 15%, Class C: tail 5%).
+| Nhóm Measure | Danh Sách Trường | Tính Chất | Quy Tắc Tập Hợp & Khuyến Nghị BI |
+|---|---|---|---|
+| **Additive Measures** | `Quantity`, `Revenue`, `Cost`, `Profit`, `Shipping_Cost` | Cộng dồn được theo mọi chiều | Dùng `SUM(...)` trực tiếp trong DAX Power BI hoặc SQL queries. |
+| **Non-Additive Measures** | `Profit_Margin_Percent` | Tỷ lệ phần trăm biên lợi nhuận dòng | **Tuyệt đối không dùng `AVG()` các dòng**. Phải tính bằng: $\frac{\sum Profit}{\sum Revenue} \times 100$. |
+| **Repeated Non-Additive Attribute** | `Order_Total_Revenue` | Tổng doanh thu cả đơn, lặp lại trên từng line item | **Tuyệt đối không dùng `SUM(Order_Total_Revenue)`** trên FactSales vì gây nhân đôi doanh thu. Dùng `mart_order_summary` để phân tích cấp đơn hàng. |
 
 ---
 
-## 11. Quy Trình Xử Lý: Bootstrap vs Incremental Pipeline
+## 11. Tầng Gold Analytics: 12 Data Marts & Phiên Bản Chính Sách
 
-Hệ thống phân tách rõ ràng 2 chế độ vận hành:
-
-### 1. Bootstrap Pipeline (Full Refresh)
-- **Mục đích:** Khởi tạo kho dữ liệu từ đầu hoặc nạp lại toàn bộ lịch sử.
-- **Quy trình:**
-  - Landing CSV $\to$ Ghi đè (`mode="overwrite"`) vào Bronze Delta kèm Ingestion Metadata.
-  - Làm sạch Silver $\to$ Lưu đè vào Silver Delta và Quarantine Delta.
-  - Rebuild toàn bộ 7 Dimensions và FactSales theo Star Schema.
-  - Tính toán và đăng ký toàn bộ 12 Gold Data Marts.
-
-### 2. Incremental Pipeline (Micro-batch & Upsert)
-- **Mục đích:** Nạp dữ liệu định kỳ với thời gian xử lý và tài nguyên tối ưu.
-- **Quy trình:**
-  - Micro-batch CSV $\to$ Ghi tiếp (`mode="append"`) vào Bronze Delta.
-  - Làm sạch batch mới qua Data Quality Gate.
-  - **Delta MERGE INTO** tầng Silver theo khóa nghiệp vụ (`Order_ID + Product_Name`):
-    - `whenMatchedUpdateAll()`
-    - `whenNotMatchedInsertAll()`
-  - Cập nhật Star Schema và làm mới các Data Marts liên quan.
+Tầng Gold Marts tổng hợp các lát cắt kinh doanh quan trọng và version hóa chính sách phân tích:
+1. `mart_overview`: Chỉ số điều hành tổng quan (Doanh thu, Lợi nhuận gộp, Đơn hàng, Biên lợi nhuận trung bình).
+2. `mart_order_summary`: Tổng hợp ở mức đơn hàng (**Order grain**), phân tách rõ ràng với FactSales (Line-item grain).
+3. `mart_revenue_by_region`: Doanh thu & lợi nhuận theo vùng địa lý.
+4. `mart_revenue_by_country`: Doanh thu chi tiết theo từng quốc gia.
+5. `mart_revenue_by_category`: Phân tích cơ cấu ngành hàng và nhóm sản phẩm.
+6. `mart_top_products_by_revenue`: Top 10 sản phẩm đóng góp doanh thu lớn nhất.
+7. `mart_payment_analysis`: Hiệu quả doanh thu theo phương thức thanh toán.
+8. `mart_shipping_analysis`: Tốc độ giao hàng trung bình và chi phí vận chuyển.
+9. `mart_order_status_analysis`: Tỷ lệ hoàn thành đơn, đơn hủy và đơn hoàn trả.
+10. `mart_monthly_revenue`: Xu hướng tăng trưởng doanh thu theo chuỗi thời gian tháng.
+11. `mart_customer_segment_analysis`: Giá trị đơn hàng trung bình (AOV) theo phân khúc khách hàng.
+12. `mart_rfm_customer_segmentation`: Phân khúc khách hàng rule-based RFM (*Champions, Loyal, At-Risk, Casual*) kèm `Rule_Version = rfm-v1`.
+13. `mart_abc_product_analysis`: Phân tích Pareto ABC (*Class A: 80%, Class B: 15%, Class C: 5%*) dùng `Cumulative_Before_Percent` kèm `Rule_Version = abc-v1`.
 
 ---
 
-## 12. Tầng Phục Vụ Dữ Liệu (Serving Layer Architecture)
+## 12. Đối Soát & Bất Biến Dữ Liệu (Data Reconciliation Gate)
 
-### 1. Phục Vụ Báo Cáo BI (Power BI qua Spark Thrift Server & Hive Metastore)
-- **Nguyên lý:** Tầng lưu trữ thực tế là các thư mục **Delta Lake**. Hive Metastore chỉ đóng vai trò **Data Catalog** (đăng ký metadata bảng và schema).
-- **Truy vấn:** Power BI kết nối qua chuẩn **ODBC/JDBC** tới Spark Thrift Server, truy vấn trực tiếp bảng Delta đã được đăng ký (`CREATE TABLE USING DELTA LOCATION '...'`).
-
-### 2. Phục Vụ Ứng Dụng Vận Hành (MongoDB Serving Collections)
-- **Nguyên lý Single Source of Truth:** MongoDB **chỉ nạp dữ liệu từ tầng Gold Analytics**, tuyệt đối không nạp tầng Silver thô để tránh nguy cơ lệch số liệu với Power BI.
-- **Collections được đồng bộ:** Các tài liệu phân tích đã tính toán sẵn có độ trễ truy vấn thấp (low latency):
-  - `Gold_Overview`
-  - `Gold_TopProducts`
-  - `Gold_RFM_Segmentation`
-  - `Gold_ABC_ProductAnalysis`
-  - `Gold_CustomerSegments`, `Gold_RevenueByRegion`, `Gold_MonthlyRevenue`...
-
----
-
-## 13. Ánh Xạ Semantic Layer Sang Power BI Dashboard
-
-File báo cáo [BI_BIG .pbix](BI_BIG%20.pbix) được kết nối chặt chẽ với tầng ngữ nghĩa của Lakehouse:
-
-| Trang Dashboard Power BI | Nguồn Bảng Gold Data Mart | Các KPI & Trực Quan Hóa Chính |
-|---|---|---|
-| **Executive Overview** | `mart_overview` & `mart_monthly_revenue` | Tổng doanh thu, Lợi nhuận ròng, AOV, Tỷ lệ hủy đơn, Biểu đồ xu hướng tháng |
-| **Regional Sales** | `mart_revenue_by_region` & `mart_revenue_by_country` | Bản đồ nhiệt doanh thu theo quốc gia, Tỷ trọng doanh thu theo khu vực |
-| **Product & Pareto ABC** | `mart_abc_product_analysis` & `mart_top_products` | Phân loại Class A/B/C, Doanh thu tích lũy đường cong Pareto, Top 10 sản phẩm |
-| **RFM Customer Matrix** | `mart_rfm_customer_segmentation` | Lưới ma trận phân hạng Champions vs At-Risk, Tần suất mua và Giá trị đóng góp |
-| **Operations & Shipping** | `mart_shipping_analysis` & `mart_order_status` | Thời gian vận chuyển trung bình theo đơn vị giao hàng, Tỷ lệ đơn hoàn trả |
-
----
-
-## 14. Đối Soát & Bất Biến Dữ Liệu (Data Reconciliation)
-
-Hệ thống cung cấp các kiểm thử bất biến toán học tự động để chứng minh tính chính xác tuyệt đối:
-
-1. **Bất biến Doanh thu (Revenue Invariant):**
-   $$\sum \text{Silver.Revenue} = \sum \text{FactSales.Revenue} = \text{Mart Overview Total\_Revenue}$$
-2. **Bảo toàn Số lượng Dòng (Row Count Conservation):**
-   $$\text{Bronze Rows} = \text{Silver Rows} + \text{Quarantined Rows} + \text{Deduplicated Rows}$$
-3. **Tính Duy nhất của Fact Grain:**
-   $$\text{Distinct}(\text{SalesKey}) = \text{Count}(\text{FactSales})$$
-
----
-
-## 15. Bộ Kiểm Thử Tự Động (Automated Testing Suite)
-
-Toàn bộ quy tắc chất lượng dữ liệu, mô hình hóa SCD2 và đối soát được kiểm tra bằng Pytest:
+Trước khi dữ liệu được cấp phép phục vụ BI hoặc đồng bộ sang MongoDB, hệ thống thực thi bộ kiểm toán toán học tự động qua module `lakehouse.reconciliation`:
 
 ```powershell
-# Chạy toàn bộ 31 bài test tự động
+python SourceCode\project_cli.py reconcile
+```
+
+Các bất biến được kiểm tra tự động:
+1. **Bất biến Doanh thu:** $\sum \text{Silver.Revenue} = \sum \text{FactSales.Revenue} = \text{Mart Overview Total\_Revenue}$.
+2. **Bảo toàn Số dòng:** $\text{Raw} = \text{Clean Valid} + \text{Quarantined} + \text{Duplicate}$.
+3. **Tính Duy nhất của Fact Grain:** $\text{Count}(\text{FactSales}) = \text{CountDistinct}(\text{SalesKey})$.
+4. **Toàn vẹn Khóa ngoại (Zero Orphan Keys):** Không tồn tại bất kỳ dòng Fact nào có khóa ngoại NULL.
+5. **Toàn vẹn Thời gian SCD2:** Không có khoảng $[ValidFrom, ValidTo)$ nào bị đảo ngược và mỗi khách hàng chỉ có duy nhất 1 bản ghi `Is_Current = 1`.
+
+---
+
+## 13. Tầng Phục Vụ BI: Power BI qua Spark Thrift Server & Hive Metastore
+
+- **Nguyên lý kiến trúc:** Thư mục lưu trữ thực tế là các bảng **Delta Lake** lưu trữ trên Local Storage hoặc HDFS. Hive Metastore chỉ đóng vai trò **Data Catalog** (quản lý metadata và schema bảng).
+- **Kết nối trực tiếp:** Power BI kết nối qua chuẩn **ODBC/JDBC** tới Spark Thrift Server, truy vấn bảng Delta đã đăng ký:
+  ```sql
+  CREATE TABLE IF NOT EXISTS gold.fact_sales
+  USING DELTA
+  LOCATION '/ecommerce/gold/star_schema/fact_sales_delta'
+  ```
+- File thiết kế Dashboard hoàn chỉnh: [BI_BIG .pbix](BI_BIG%20.pbix).
+
+---
+
+## 14. Tầng Phục Vụ Ứng Dụng: MongoDB Secondary Serving Store
+
+- **Serving Contract (Gold-Only):** MongoDB **chỉ nạp dữ liệu từ tầng Gold Certified** (`mart_overview`, `mart_top_products`, `mart_rfm_customer_segmentation`, `mart_order_summary`...), tuyệt đối không đọc từ tầng Silver thô để tránh nguy cơ lệch số liệu với BI.
+- **Vai trò kỹ thuật:** MongoDB đóng vai trò là **Secondary Operational Document Store** phục vụ các ứng dụng web, microservices hoặc backend APIs với độ trễ thấp (low latency key-value / document lookup), **không phải nguồn chân lý phân tích (Single Source of Truth) thay thế kho dữ liệu**.
+
+---
+
+## 15. Delta Lake ACID Transactions & Thử Nghiệm Cô Lập (Isolated Demos)
+
+Hệ thống tích hợp các bài kiểm thử tính năng nâng cao của Delta Lake:
+- **Schema Enforcement:** Kiểm tra Delta Lake từ chối ghi dữ liệu sai schema. **Quy tắc an toàn:** Bài test được cô lập trên Delta table tạm thời (`/ecommerce/test/schema_enforcement_temp`), tuyệt đối không đụng vào bảng Silver/Gold production.
+- **Time Travel & Versioning:** Đọc dữ liệu tại phiên bản quá khứ bằng `versionAsOf` và xem lịch sử commit log qua `history()`.
+
+Chạy kịch bản thử nghiệm:
+```powershell
+python SourceCode\project_cli.py delta-demo
+```
+
+---
+
+## 16. Vận Hành & Giám Sát Chất Lượng (Data Observability Table)
+
+Mỗi lần pipeline thực thi, số liệu tổng quan về chất lượng được lưu tự động vào Delta table `gold_monitoring.pipeline_quality`:
+- `run_id`: Mã nhận diện lần chạy.
+- `batch_id`: Mã nhận diện batch nạp.
+- `raw_rows`: Tổng số dòng thô đầu vào.
+- `duplicate_rows`: Số dòng trùng lặp được loại bỏ.
+- `valid_rows`: Số dòng hợp lệ nạp vào Silver.
+- `rejected_rows`: Số dòng lỗi bị phân lập vào Quarantine.
+- `reject_rate_percent`: Tỷ lệ lỗi vi phạm (%).
+- `status`: Trạng thái xử lý (`SUCCESS` hoặc `QUARANTINE_PRESENT`).
+- `recorded_at`: Thời gian ghi nhận số liệu.
+
+---
+
+## 17. Đánh Giá Hiệu Năng: Synthetic Single-Node Scaling Experiment
+
+Báo cáo thử nghiệm khả năng mở rộng đơn nút (**Synthetic Single-Node Scaling Experiment**) với generator Spark-native từ 10K đến 1M dòng:
+
+| Workload Scale | Raw Rows | Input Size (MB) | Runtime (seconds) | Throughput (rows/s) | Partitions | Fact Rows Generated | Zero Duplication |
+|---|---|---|---|---|---|---|---|
+| **10K** | 10,000 | ~1.85 MB | ~3.2 s | ~3,125 rows/s | 4 | 10,000 | ✅ 100% |
+| **100K** | 100,000 | ~18.50 MB | ~12.4 s | ~8,064 rows/s | 8 | 100,000 | ✅ 100% |
+| **1M** | 1,000,000 | ~185.00 MB | ~94.8 s | ~10,548 rows/s | 16 | 1,000,000 | ✅ 100% |
+
+- **Generator:** `scripts/benchmark_scalability.py` sinh dữ liệu trực tiếp bằng `spark.range`, không chiếm dụng bộ nhớ RAM của driver Python.
+- **Chi tiết phương pháp luận & manifest phần cứng:** Xem tại [docs/BENCHMARK.md](docs/BENCHMARK.md).
+
+---
+
+## 18. Chiến Lược Kiểm Thử Tự Động (Automated Testing Suite)
+
+Bộ kiểm thử tự động toàn diện kiểm chứng từ Data Contract, Logic Analytics đến Bất biến Đối soát:
+
+```powershell
+# Chạy toàn bộ test suite
 python -m pytest -v --basetemp=./scratch/pytest_temp
 ```
 
-### Danh Mục Test Cases:
-- `test_gold_revenue_reconciles_with_silver`: Kiểm tra đối soát doanh thu 3 tầng.
+### Danh Mục Các Test Cases Trọng Yếu:
+- `test_gold_revenue_reconciles_with_silver_and_marts`: Kiểm tra bất biến doanh thu 3 tầng.
 - `test_fact_grain_uniqueness`: Kiểm tra tính duy nhất của Grain FactSales.
-- `test_row_count_conservation`: Kiểm tra định luật bảo toàn số dòng.
+- `test_row_count_conservation`: Kiểm tra định luật bảo toàn số dòng $Raw = Valid + Invalid + Duplicate$.
+- `test_data_reconciliation_gate_full_report`: Kiểm tra toàn bộ cổng đối soát và sinh file JSON.
 - `test_dim_customer_scd2`: Kiểm tra trạng thái lặp lại $A \to B \to A$ tạo đúng 3 phiên bản.
-- `test_dim_customer_deduplication_prevents_fact_duplication`: Kiểm tra không nhân bản Fact khi join dimension.
-- `test_revenue_per_order_window_and_quarantine`: Kiểm tra Quarantine đa lỗi và Order_Total_Revenue.
-- `test_marts_when_import_and_rfm_abc`: Kiểm tra RFM và Pareto ABC.
+- `test_scd2_only_one_current_record_per_customer`: Kiểm tra duy nhất 1 bản ghi hiện hành cho mỗi khách hàng.
+- `test_quarantine_multi_reason_array`: Kiểm tra mảng đa lỗi vi phạm trong bảng Quarantine.
+- `test_cli_accepts_all_public_commands`: Kiểm tra tính đầy đủ của bộ chỉ huy CLI.
+- `test_cli_pipeline_subcommands_and_flags`: Kiểm tra chuyển tiếp cờ `--scd2`, `--local`, `--incremental`.
 
 ---
 
-## 16. Đánh Giá Hiệu Năng & Khả Năng Mở Rộng (Scalability Benchmark)
+## 19. Giới Hạn Hiện Tại & Ranh Giới Kỹ Thuật (Production Boundary)
 
-Thử nghiệm đánh giá khả năng mở rộng với dữ liệu giả lập tổng hợp (**Synthetic Scalability Evaluation**) từ 10K đến 1M dòng:
-
-| Quy Mô Workload | Số Dòng Thô | Dung Lượng Đầu Vào | Thời Gian Chạy | Throughput (dòng/giây) | Số Partition | Số Dòng Fact Tạo Ra |
-|---|---|---|---|---|---|---|
-| **10K** | 10,000 | ~1.65 MB | ~3.8 s | ~2,630 dòng/s | 2 | 10,000 |
-| **100K** | 100,000 | ~16.5 MB | ~11.2 s | ~8,920 dòng/s | 4 | 100,000 |
-| **1M** | 1,000,000 | ~165.0 MB | ~54.6 s | ~18,315 dòng/s | 8 | 1,000,000 |
-
-*Chi tiết phương pháp luận đo lường xem tại [docs/BENCHMARK.md](docs/BENCHMARK.md).*
+Nhằm duy trì tính trung thực cao nhất của một Portfolio Data Engineering, hệ thống ghi nhận rõ ràng các giới hạn kỹ thuật:
+1. **Surrogate Key Policy:** Đang áp dụng *Deterministic Rebuild Key* bằng `row_number().over(Window.orderBy(...))`. Môi trường doanh nghiệp dài hạn nhiều năm cần chuyển sang dịch vụ cấp sequence hoặc stateful Delta lookup.
+2. **Gold Refresh:** Incremental pipeline hiện thực hiện *Incremental Bronze/Silver MERGE kèm Deterministic Gold Refresh*, chưa phải incremental Fact MERGE cấp phân vùng.
+3. **Môi Trường Benchmark:** Thử nghiệm scaling trên máy trạm cục bộ (Single-node), không đại diện cho cluster phân tán lớn.
 
 ---
 
-## 17. Sổ Tay Vận Hành CLI (Command Line Operations)
+## 20. Lộ Trình Chiến Lược (Strategic Roadmap) & CV Placement
 
-CLI hợp nhất `SourceCode/project_cli.py` cung cấp đầy đủ các tác vụ vận hành:
-
-```powershell
-# 1. Chẩn đoán môi trường hệ thống (Python, Java, HDFS, Spark, Delta)
-python SourceCode\project_cli.py doctor
-
-# 2. Kiểm tra chất lượng dữ liệu đầu vào, sinh báo cáo và chạy toàn bộ Unit Tests
-python SourceCode\project_cli.py check
-
-# 3. Khởi chạy Lakehouse Medallion Pipeline hoàn chỉnh với SCD Type 2
-python SourceCode\project_cli.py pipeline --local --scd2
-
-# 4. Chạy kịch bản thử nghiệm Delta Lake (Time Travel, Schema Enforcement cô lập an toàn)
-python SourceCode\project_cli.py delta-demo
-
-# 5. Khởi chạy Scalability Benchmark (10K, 100K, 1M rows)
-python SourceCode\project_cli.py benchmark
-
-# 6. Đồng bộ các bảng Gold Analytics sang MongoDB Collections
-python SourceCode\project_cli.py mongodb
-
-# 7. Khởi động Spark Thrift Server kết nối Power BI
-python SourceCode\project_cli.py thrift
-```
-
----
-
-## 18. Cấu Trúc Thư Mục Dự Án (Project Structure)
-
-```
-GlobalEcommerceBigData/
-├── contracts/                               # Khai báo Data Contract độc lập
-│   └── ecommerce_order.yaml                # Ràng buộc schema và luật nghiệp vụ
-├── Data/                                    # Tầng Landing lưu file dữ liệu nguồn
-│   └── EcommerceSalesDataset.csv
-├── docs/                                    # Tài liệu kỹ thuật chuyên sâu
-│   ├── ARCHITECTURE.md                      # Phân tích quyết định kỹ thuật
-│   ├── BENCHMARK.md                         # Báo cáo hiệu năng và throughput
-│   ├── BUSINESS_INSIGHTS.md                 # Báo cáo phân tích kinh doanh tự động
-│   ├── DATA_DICTIONARY.md                   # Từ điển dữ liệu và công thức KPI
-│   └── PORTFOLIO.md                         # Tài liệu STAR Story dành cho phỏng vấn
-├── sql/                                     # Kho lưu trữ mã nguồn SQL bổ trợ
-│   └── reference_star_schema.sql            # Bản mẫu DDL Star Schema cho Relational DW
-├── SourceCode/                              # Mã nguồn chính của nền tảng
-│   ├── config.py                            # Cấu hình tập trung hỗ trợ đa môi trường
-│   ├── data_quality.py                      # Engine kiểm định Data Contract
-│   ├── analytics_rules.py                   # Bộ quy tắc RFM & ABC tập trung
-│   ├── project_cli.py                       # CLI điều phối thống nhất (globalcart)
-│   ├── SparkEcommerceAnalysis.py            # Entry point chạy pipeline
-│   ├── InsertMongoDB.py                     # Đồng bộ Gold Delta sang MongoDB
-│   ├── start_thrift_server.py               # Khởi động Thrift Server cho Power BI
-│   └── lakehouse/                           # Package Lakehouse Core Engine
-│       ├── ingestion.py                     # Landing -> Bronze kèm metadata
-│       ├── silver.py                        # Silver cleaning & multi-error quarantine
-│       ├── dimensions.py                    # 7 Kimball Dimensions & SCD2 logic
-│       ├── marts.py                         # FactSales & 12 Gold Data Marts
-│       ├── storage.py                       # Delta I/O, Hive catalog & demo isolation
-│       └── pipeline.py                      # Điều phối Bootstrap & Incremental
-├── tests/                                   # Bộ kiểm thử tự động
-│   ├── test_lakehouse_pipeline.py           # Unit tests cho Silver, Marts, SCD2
-│   ├── test_reconciliation.py               # Kiểm thử đối soát bất biến doanh thu & grain
-│   ├── test_analytics_contract.py           # Kiểm định tính đồng nhất giữa Spark và Pandas
-│   ├── test_data_quality.py                 # Kiểm tra các quy tắc Data Quality
-│   └── test_config.py                       # Kiểm tra cấu hình và đường dẫn lưu trữ
-├── BI_BIG .pbix                             # File thiết kế Power BI Dashboard
-├── requirements.txt                         # Danh sách thư viện phụ thuộc
-└── pyproject.toml                           # Cấu hình công cụ Pytest và Ruff Linter
-```
-
----
-
-## 19. Giới Hạn Hiện Tại & Lộ Trình Phát Triển (Strategic Roadmap)
+### Bảng Phân Cấp Lộ Trình Kỹ Thuật:
 
 | Mức Độ Ưu Tiên | Trạng Thái | Hạng Mục Công Việc Kỹ Thuật |
 |---|---|---|
-| 🔴 **P0 (Critical)** | **ĐÃ HOÀN THÀNH** | Sửa cờ `--scd2` CLI chuyển tiếp chính xác vào pipeline |
-| 🔴 **P0 (Critical)** | **ĐÃ HOÀN THÀNH** | Sửa giải thuật SCD2 lặp lại ($A \to B \to A$) bằng Event Change Detection |
-| 🔴 **P0 (Critical)** | **ĐÃ HOÀN THÀNH** | Xác định Grain chính thức (Line-item) và khóa MERGE Silver an toàn |
-| 🔴 **P0 (Critical)** | **ĐÃ HOÀN THÀNH** | Cô lập bài test Schema Enforcement sang Delta table tạm thời |
-| 🔴 **P0 (Critical)** | **ĐÃ HOÀN THÀNH** | Thống nhất MongoDB chỉ phục vụ tầng Gold Serving / Analytics |
-| 🟠 **P1 (High)** | **ĐÃ HOÀN THÀNH** | Bổ sung Bronze Ingestion Metadata (`_ingested_at`, `_source_file`, `_batch_id`...) |
-| 🟠 **P1 (High)** | **ĐÃ HOÀN THÀNH** | Tách Data Contract độc lập sang `contracts/ecommerce_order.yaml` |
-| 🟠 **P1 (High)** | **ĐÃ HOÀN THÀNH** | Bảng Quarantine ghi nhận danh sách đa lỗi (`rejection_reasons`) |
-| 🟠 **P1 (High)** | **ĐÃ HOÀN THÀNH** | Xây dựng bảng giám sát Data Observability `pipeline_quality` |
-| 🟠 **P1 (High)** | **ĐÃ HOÀN THÀNH** | Bổ sung bộ kiểm thử đối soát bất biến doanh thu và bảo toàn số dòng |
-| 🟡 **P2 (Medium)** | *Đang nghiên cứu* | Tích hợp Apache Airflow DAG điều phối task dependencies có cơ chế retry |
-| 🟡 **P2 (Medium)** | *Đang nghiên cứu* | Tích hợp dbt-databricks/dbt-spark cho semantic transformation layer |
-| 🟡 **P2 (Medium)** | *Đang nghiên cứu* | Mở rộng lưu trữ Object Storage đám mây (AWS S3 / MinIO S3 API) |
+| 🔴 **P0 (Critical)** | **ĐÃ HOÀN THÀNH** | Sửa cờ `--scd2` CLI chuyển tiếp chính xác xuyên suốt qua `PipelineConfig` |
+| 🔴 **P0 (Critical)** | **ĐÃ HOÀN THÀNH** | Incremental pipeline bảo toàn mô hình hóa SCD Type 2 |
+| 🔴 **P0 (Critical)** | **ĐÃ HOÀN THÀNH** | Định vị chính xác: Incremental Silver MERGE với Deterministic Gold Refresh |
+| 🔴 **P0 (Critical)** | **ĐÃ HOÀN THÀNH** | Sửa giải thuật SCD2 lặp lại ($A \to B \to A$) bằng Event-Order Change Detection |
+| 🔴 **P0 (Critical)** | **ĐÃ HOÀN THÀNH** | Xác lập `Order_Line_ID` cho Silver MERGE chống conflation nhiều dòng cùng SKU |
+| 🔴 **P0 (Critical)** | **ĐÃ HOÀN THÀNH** | Cô lập bài test Schema Enforcement sang Delta table tạm thời độc lập |
+| 🔴 **P0 (Critical)** | **ĐÃ HOÀN THÀNH** | Thống nhất Serving Contract: MongoDB chỉ phục vụ tầng Gold Certified |
+| 🔴 **P0 (Critical)** | **ĐÃ HOÀN THÀNH** | Tái cấu trúc Benchmark generator Spark-native và hiệu chỉnh báo cáo 10K-1M |
+| 🟠 **P1 (High)** | **ĐÃ HOÀN THÀNH** | Bronze Ingestion Metadata (`_ingested_at`, `_source_file`, `_source_hash`...) |
+| 🟠 **P1 (High)** | **ĐÃ HOÀN THÀNH** | Bảng Ingestion Batches Registry kiểm soát Idempotency |
+| 🟠 **P1 (High)** | **ĐÃ HOÀN THÀNH** | Bảng Quarantine ghi nhận danh sách mảng đa lỗi (`rejection_reasons`) |
+| 🟠 **P1 (High)** | **ĐÃ HOÀN THÀNH** | Tách bạch số liệu trùng lặp vs vi phạm ($Raw = Valid + Invalid + Duplicate$) |
+| 🟠 **P1 (High)** | **ĐÃ HOÀN THÀNH** | Xây dựng Data Reconciliation Gate (`globalcart reconcile`) xuất báo cáo JSON |
+| 🟠 **P1 (High)** | **ĐÃ HOÀN THÀNH** | Nâng cấp CLI hỗ trợ `pipeline bootstrap`, `incremental`, `serve`, `reconcile` |
+| 🟠 **P1 (High)** | **ĐÃ HOÀN THÀNH** | Gắn phiên bản chính sách phân tích (`rfm-v1`, `abc-v1`) vào Data Marts |
+| 🟡 **P2 (Medium)** | *Đang nghiên cứu* | Incremental Fact MERGE & Partition-aware Data Mart refresh |
+| 🟡 **P2 (Medium)** | *Đang nghiên cứu* | MongoDB bulk upsert đồng bộ tăng tiến |
+| 🟡 **P2 (Medium)** | *Đang nghiên cứu* | Apache Airflow DAG điều phối task dependencies có cơ chế retry |
 | 🟡 **P3 (Future)** | *Tương lai* | CDC Streaming Ingestion với Apache Kafka và Spark Structured Streaming |
+
+---
+
+### 💼 Định Vị Portfolio & CV Bullets
+
+**Tiêu đề Dự án Khuyến nghị cho CV:**
+> **GlobalCart Lakehouse Analytics Platform — Incremental PySpark/Delta Data Engineering & BI**
+
+**Đoạn mô tả ngắn (1 câu):**
+> *Built a PySpark/Delta Lake ecommerce analytics platform implementing Medallion architecture, data-quality quarantine, incremental upserts, Kimball star-schema modeling, SCD Type 2 customer history, 12 analytical marts, reconciliation tests, and Power BI serving.*
+
+**Pipeline vắn tắt cho CV:**
+$$\text{Raw Ecommerce Data} \longrightarrow \text{Bronze Delta} \longrightarrow \text{Data Quality \& Quarantine} \longrightarrow \text{Silver MERGE} \longrightarrow \text{Kimball Fact + SCD2 Dimensions} \longrightarrow \text{Gold Marts} \longrightarrow \text{Reconciliation Gate} \longrightarrow \text{Hive / Power BI / MongoDB}$$
+
+**Các điểm đắt giá cho buổi phỏng vấn kỹ thuật:**
+1. **Deduplication vs Quarantine Accounting:** Giải thích cách bảo toàn $Raw = Valid + Invalid + Duplicate$, chỉ ra vì sao nhiều pipeline mắc lỗi coi duplicate là quarantine.
+2. **SCD Type 2 Event-Order Transition:** Phân tích giải thuật dùng `lag()` và cumulative island grouping để giải quyết lỗi kinh điển $A \to B \to A$ mà phép `groupBy().min()` truyền thống làm mất.
+3. **Line-Item Identity trong Silver MERGE:** Phân tích tại sao `(Order_ID, Product_Name)` chưa đủ chắc nếu một đơn có nhiều dòng cùng SKU, và cách khắc phục bằng `Order_Line_ID`.
+4. **Data Reconciliation Invariants:** Trình bày 5 kiểm tra bất biến toán học tự động bảo đảm số liệu tài chính trùng khớp 100% trước khi đưa vào Power BI.
+5. **Cumulative_Before_Percent trong Pareto ABC:** Giải thích quyết định sử dụng tỷ trọng doanh thu tích lũy *trước* sản phẩm hiện tại để phân loại Class A/B/C hợp lý hơn.
 
 ---
 
 ## 🛡️ License & Tác Giả
 
-Dự án được xây dựng và duy trì bởi **Hà Minh Thông** dưới dạng **Portfolio Dự Án Kỹ Sư Dữ Liệu Chuyên Nghiệp**.
-Mọi thắc mắc hoặc thảo luận kỹ thuật xin vui lòng mở issue hoặc liên hệ trực tiếp.
+Dự án được thiết kế, phát triển và duy trì bởi **Hà Minh Thông** dưới dạng **Portfolio Dự Án Kỹ Sư Dữ Liệu Chuyên Nghiệp**.
+Mọi thảo luận kỹ thuật xin vui lòng liên hệ trực tiếp.

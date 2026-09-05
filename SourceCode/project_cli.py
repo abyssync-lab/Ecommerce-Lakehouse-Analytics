@@ -71,6 +71,18 @@ def run_quality_checks() -> int:
     ).returncode
 
 
+def run_reconciliation() -> int:
+    """Khởi chạy bộ kiểm toán đối soát bất biến doanh thu, số dòng và SCD2."""
+    LOGGER.info("Khởi chạy kiểm toán Data Reconciliation Gate...")
+    temp_dir = PROJECT_ROOT / "scratch" / "pytest_temp"
+    temp_dir.mkdir(parents=True, exist_ok=True)
+    return subprocess.run(
+        [sys.executable, "-m", "pytest", "tests/test_reconciliation.py", "-v", f"--basetemp={temp_dir}"],
+        cwd=PROJECT_ROOT,
+        check=False,
+    ).returncode
+
+
 def build_parser() -> argparse.ArgumentParser:
     """Khởi tạo Bộ điều hướng CLI với các subcommands hỗ trợ Tiếng Việt chi tiết.
 
@@ -93,8 +105,32 @@ def build_parser() -> argparse.ArgumentParser:
         "report", help="📊 Sinh lại báo cáo Business Insights tự động (docs/BUSINESS_INSIGHTS.md)"
     )
 
+    reconcile_parser = commands.add_parser(
+        "reconcile", help="⚖️ Chạy kiểm toán đối soát bất biến doanh thu, grain và SCD2"
+    )
+    reconcile_parser.add_argument("--run-id", type=str, default=None, help="Mã nhận diện phiên kiểm toán")
+
     pipeline_parser = commands.add_parser(
-        "pipeline", help="⚙️ Chạy Pipeline PySpark Medallion Lakehouse (Bronze-Silver-Gold)"
+        "pipeline", help="⚙️ Chạy Pipeline PySpark Medallion Lakehouse (Bootstrap / Incremental)"
+    )
+    pipeline_parser.add_argument(
+        "mode",
+        nargs="?",
+        default="bootstrap",
+        choices=["bootstrap", "incremental"],
+        help="Chế độ thực thi: 'bootstrap' (Full Refresh) hoặc 'incremental' (Micro-batch MERGE)",
+    )
+    pipeline_parser.add_argument(
+        "--input",
+        type=str,
+        default=None,
+        help="Đường dẫn file CSV đầu vào",
+    )
+    pipeline_parser.add_argument(
+        "--batch-id",
+        type=str,
+        default=None,
+        help="Mã nhận diện batch nạp",
     )
     pipeline_parser.add_argument(
         "--local",
@@ -110,6 +146,20 @@ def build_parser() -> argparse.ArgumentParser:
         "--demo",
         action="store_true",
         help="Chạy kèm các bài demo Delta Lake (Time Travel, Schema Enforcement an toàn)",
+    )
+    pipeline_parser.add_argument(
+        "--incremental",
+        action="store_true",
+        help="Cờ tương đương chế độ 'incremental'",
+    )
+
+    serve_parser = commands.add_parser(
+        "serve", help="🚀 Khởi động dịch vụ phục vụ dữ liệu (thrift hoặc mongodb)"
+    )
+    serve_parser.add_argument(
+        "target",
+        choices=["thrift", "mongodb"],
+        help="Dịch vụ cần khởi chạy: thrift (Power BI) hoặc mongodb (Serving Collections)",
     )
 
     commands.add_parser(
@@ -149,6 +199,9 @@ def main(arguments: list[str] | None = None) -> int:
     if args.command == "check":
         return run_quality_checks()
 
+    if args.command == "reconcile":
+        return run_reconciliation()
+
     if args.command == "benchmark":
         LOGGER.info("Khởi chạy Synthetic Scalability Benchmark...")
         benchmark_script = PROJECT_ROOT / "scripts" / "benchmark_scalability.py"
@@ -158,9 +211,18 @@ def main(arguments: list[str] | None = None) -> int:
         LOGGER.info("Khởi chạy kịch bản thử nghiệm Delta Lake...")
         return run_python("SparkEcommerceAnalysis.py", arguments=["--demo"])
 
+    if args.command == "serve":
+        script_by_serve = {
+            "thrift": "start_thrift_server.py",
+            "mongodb": "InsertMongoDB.py",
+        }
+        return run_python(script_by_serve[args.target])
+
     if args.command == "pipeline":
         env_vars = {}
         script_args = []
+        is_incremental = getattr(args, "incremental", False) or getattr(args, "mode", "bootstrap") == "incremental"
+
         if getattr(args, "local", False):
             env_vars["ECOMMERCE_USE_LOCAL_STORAGE"] = "true"
         if getattr(args, "scd2", False):
@@ -168,7 +230,19 @@ def main(arguments: list[str] | None = None) -> int:
             script_args.append("--scd2")
         if getattr(args, "demo", False):
             script_args.append("--demo")
-        LOGGER.info("Khởi chạy Spark Lakehouse Pipeline (Local=%s, SCD2=%s)...", env_vars.get("ECOMMERCE_USE_LOCAL_STORAGE", "false"), env_vars.get("ECOMMERCE_USE_SCD2", "false"))
+        if getattr(args, "input", None):
+            script_args.extend(["--input", str(args.input)])
+        if getattr(args, "batch_id", None):
+            script_args.extend(["--batch-id", str(args.batch_id)])
+        if is_incremental:
+            script_args.append("--incremental")
+
+        LOGGER.info(
+            "Khởi chạy Spark Lakehouse Pipeline (Mode=%s, Local=%s, SCD2=%s)...",
+            "INCREMENTAL" if is_incremental else "BOOTSTRAP",
+            env_vars.get("ECOMMERCE_USE_LOCAL_STORAGE", "false"),
+            env_vars.get("ECOMMERCE_USE_SCD2", "false"),
+        )
         return run_python("SparkEcommerceAnalysis.py", arguments=script_args, env_vars=env_vars)
 
     script_by_command = {
@@ -181,3 +255,4 @@ def main(arguments: list[str] | None = None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+

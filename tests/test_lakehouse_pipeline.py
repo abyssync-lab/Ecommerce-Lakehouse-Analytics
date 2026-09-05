@@ -158,3 +158,55 @@ def test_revenue_per_order_window_and_quarantine(spark_session, tmp_path):
     # Backward compatibility alias
     ord01_rev_alias = clean_df.filter(col("Order_ID") == "ORD01").select("Revenue_Per_Order").collect()[0][0]
     assert ord01_rev_alias == 1050.0
+
+    # Check Order_Line_ID existence and uniqueness
+    assert "Order_Line_ID" in clean_df.columns
+    line_ids = [r["Order_Line_ID"] for r in clean_df.select("Order_Line_ID").collect()]
+    assert len(line_ids) == len(set(line_ids))
+
+
+def test_quarantine_multi_reason_array(spark_session, tmp_path):
+    """Kiểm tra bảng Quarantine ghi nhận danh sách mảng đa lỗi (rejection_reasons)."""
+    data = [
+        # Vi phạm cả Quantity <= 0 VÀ Discount > 1
+        ("ORD_MULTI_ERR", "2026-08-01", 2026, 8, "C001", "Laptop", "Electronics", "Tech", -5, 100.0, 2.5, 100.0, 70.0, 30.0, 10.0, 2, "Delivered"),
+    ]
+    cols = [
+        "Order_ID", "Order_Date", "Year", "Month", "Customer_ID", "Product_Name", "Category", "Sub_Category",
+        "Quantity", "Unit_Price", "Discount", "Revenue", "Cost", "Profit", "Shipping_Cost",
+        "Shipping_Days", "Order_Status"
+    ]
+    raw_df = spark_session.createDataFrame(data, cols)
+    quarantine_dir = str(tmp_path / "quarantine_multi_err")
+
+    clean_df = clean_and_enrich_silver(raw_df, quarantine_path=quarantine_dir)
+    assert clean_df.count() == 0
+
+    quarantine_df = spark_session.read.format("delta").load(quarantine_dir)
+    record = quarantine_df.collect()[0]
+    reasons = record["rejection_reasons"]
+
+    assert "INVALID_QUANTITY" in reasons
+    assert "INVALID_DISCOUNT" in reasons
+    assert len(reasons) >= 2
+
+
+def test_scd2_only_one_current_record_per_customer(spark_session):
+    """Đảm bảo với bất kỳ lịch sử chuyển đổi SCD2 nào, mỗi khách hàng chỉ có duy nhất 1 bản ghi Is_Current = 1."""
+    data = [
+        ("ORD01", "2026-01-01", "C001", "Male", "Consumer"),
+        ("ORD02", "2026-03-01", "C001", "Male", "Corporate"),
+        ("ORD03", "2026-06-01", "C001", "Male", "Consumer"),
+        ("ORD04", "2026-01-15", "C002", "Female", "Home Office"),
+        ("ORD05", "2026-04-15", "C002", "Female", "Consumer"),
+    ]
+    cols = ["Order_ID", "Order_Date", "Customer_ID", "Customer_Gender", "Customer_Segment"]
+    df = spark_session.createDataFrame(data, cols)
+
+    scd2_df = build_dim_customer_scd2(df)
+    c001_current = scd2_df.filter((col("Customer_ID") == "C001") & (col("Is_Current") == 1)).count()
+    c002_current = scd2_df.filter((col("Customer_ID") == "C002") & (col("Is_Current") == 1)).count()
+
+    assert c001_current == 1
+    assert c002_current == 1
+

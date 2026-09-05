@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
-from .pipeline import run_pipeline
+from .pipeline import run_incremental_pipeline, run_pipeline
+from .reconciliation import run_full_reconciliation
 
-__all__ = ["run_pipeline"]
+__all__ = ["run_pipeline", "run_incremental_pipeline", "run_full_reconciliation"]
+

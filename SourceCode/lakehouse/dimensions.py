@@ -32,11 +32,17 @@ LOGGER = logging.getLogger(__name__)
 def add_surrogate_key(dataframe: Any, key_name: str, order_cols: list[str]) -> Any:
     """Sinh khóa đại diện (Surrogate Key) ổn định (1, 2, 3...) bằng `row_number()`.
 
-    Dùng row_number() sắp xếp theo khóa nghiệp vụ tự nhiên thay vì monotonically_increasing_id()
-    để đảm bảo kết quả ổn định và tái lập giữa các lần chạy lại pipeline.
+    Chiến lược khóa (Surrogate Key Strategy):
+    - **Portfolio Deterministic Rebuild Key (Áp dụng tại đây):** Dùng `row_number().over(orderBy(*order_cols))`
+      sắp xếp theo khóa tự nhiên nghiệp vụ thay vì `monotonically_increasing_id()` để bảo đảm tính tái lập
+      (reproducibility) 100% giữa các lần re-run pipeline từ cùng tập dữ liệu.
+    - **Enterprise Production Persistent Key (Khuyến nghị Enterprise DW):** Tra cứu bảng Dimension Delta hiện hữu
+      (Stateful Lookup), tái sử dụng surrogate key đã cấp cho natural key cũ, và chỉ cấp mới `max(key) + sequence`
+      hoặc Hashed Surrogate Key cho các thành viên mới xuất hiện để không bao giờ làm đổi key lịch sử.
     """
     window_spec = Window.orderBy(*order_cols)
     return dataframe.withColumn(key_name, row_number().over(window_spec))
+
 
 
 def build_dim_product(clean_df: Any) -> Any:

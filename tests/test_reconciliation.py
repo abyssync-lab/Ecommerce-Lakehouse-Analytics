@@ -20,6 +20,7 @@ if str(SOURCE_DIR) not in sys.path:
 try:
     from lakehouse.dimensions import build_all_dimensions
     from lakehouse.marts import build_all_marts, build_fact_sales
+    from lakehouse.reconciliation import run_full_reconciliation
     from lakehouse.silver import clean_and_enrich_silver
     from pyspark.sql import SparkSession
     from pyspark.sql.functions import col, count, countDistinct
@@ -28,6 +29,7 @@ try:
     HAS_PYSPARK = True
 except ImportError:
     HAS_PYSPARK = False
+
 
 
 @pytest.fixture(scope="module")
@@ -138,3 +140,41 @@ def test_row_count_conservation(spark_session, tmp_path):
     assert clean_count == 2
     assert quarantine_count == 1
     assert duplicate_count == 1
+
+
+def test_data_reconciliation_gate_full_report(spark_session, tmp_path):
+    """Kiểm tra hàm run_full_reconciliation xuất kết quả PASS và sinh báo cáo JSON hợp lệ."""
+    data = [
+        ("ORD01", "2026-08-01", 2026, 8, "C001", "Male", "Consumer", "Laptop Pro", "Electronics", "Tech", 1, 1000.0, 0.0, 1000.0, 700.0, 300.0, 20.0, 2, "Delivered", "Card", "Standard", "Asia", "Vietnam"),
+        ("ORD02", "2026-08-02", 2026, 8, "C002", "Female", "Corporate", "Mouse", "Electronics", "Tech", 1, 50.0, 0.0, 50.0, 30.0, 20.0, 5.0, 1, "Delivered", "Card", "Standard", "Asia", "Vietnam"),
+    ]
+    cols = [
+        "Order_ID", "Order_Date", "Year", "Month", "Customer_ID", "Customer_Gender", "Customer_Segment",
+        "Product_Name", "Category", "Sub_Category", "Quantity", "Unit_Price", "Discount",
+        "Revenue", "Cost", "Profit", "Shipping_Cost", "Shipping_Days", "Order_Status",
+        "Payment_Method", "Shipping_Method", "Region", "Country"
+    ]
+    raw_df = spark_session.createDataFrame(data, cols)
+    clean_df = clean_and_enrich_silver(raw_df)
+
+    dims = build_all_dimensions(spark_session, clean_df, use_scd2=True)
+    fact = build_fact_sales(clean_df, dims)
+    marts = build_all_marts(clean_df)
+
+    json_report_path = tmp_path / "recon_report.json"
+    report = run_full_reconciliation(
+        clean_df=clean_df,
+        fact_sales=fact,
+        mart_overview=marts["mart_overview"],
+        dim_customer=dims["dim_customer"],
+        raw_count=2,
+        duplicate_count=0,
+        invalid_count=0,
+        export_path=json_report_path,
+    )
+
+    assert report["overall_status"] == "PASS"
+    assert json_report_path.exists()
+    assert report["checks"]["revenue_invariant"]["passed"] is True
+    assert report["checks"]["foreign_key_completeness"]["passed"] is True
+

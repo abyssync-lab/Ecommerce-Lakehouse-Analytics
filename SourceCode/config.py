@@ -91,6 +91,7 @@ class Settings:
 
     # Đường dẫn các tầng Medallion Lakehouse (Bronze, Silver, Gold, Quarantine, Monitoring)
     bronze_delta: str = "/ecommerce/bronze/ecommerce_raw_delta"
+    ingestion_batches_delta: str = "/ecommerce/bronze/ingestion_batches_delta"
     silver_delta: str = "/ecommerce/silver/ecommerce_clean_delta"
     quarantine_delta: str = "/ecommerce/quarantine/rejected_rows"
     gold_star_schema_base: str = "/ecommerce/gold/star_schema"
@@ -121,4 +122,30 @@ class Settings:
         return self.get_storage_path(self.input_csv)
 
 
+@dataclass
+class PipelineConfig:
+    """Cấu hình thực thi một chu trình Lakehouse Pipeline (Bootstrap hoặc Incremental).
+
+    Attributes:
+        execution_mode: 'bootstrap' (full refresh) hoặc 'incremental' (micro-batch MERGE).
+        use_scd2: Kích hoạt SCD Type 2 cho bảng dim_customer.
+        storage_mode: 'local' hoặc 'hdfs'.
+        batch_id: Mã nhận diện batch xử lý dữ liệu.
+        run_id: Mã nhận diện phiên chạy pipeline.
+        input_path: Đường dẫn file CSV nguồn.
+        run_delta_demo: Cờ chạy kịch bản thử nghiệm Delta Lake.
+        quarantine_path: Đường dẫn lưu trữ bảng Quarantine Delta.
+    """
+
+    execution_mode: str = "bootstrap"
+    use_scd2: bool = False
+    storage_mode: str = "local"
+    batch_id: str | None = None
+    run_id: str | None = None
+    input_path: str | None = None
+    run_delta_demo: bool = False
+    quarantine_path: str | None = None
+
+
 SETTINGS = Settings()
+

@@ -1,55 +1,69 @@
-# 💼 Portfolio Highlights & Recruiter Guide - GlobalCart Intelligence
+# 💼 Portfolio Highlights & Technical Interview Guide
 
-Tài liệu dành cho Nhà tuyển dụng (Recruiters & Technical Hiring Managers), tóm tắt các điểm sáng kỹ thuật, câu chuyện STAR phỏng vấn và CV Bullets song ngữ (Việt - Anh).
+Tài liệu hướng dẫn phỏng vấn kỹ thuật và tóm tắt điểm nhấn dành cho Nhà tuyển dụng (Recruiters & Technical Hiring Managers) cho dự án **GlobalCart Lakehouse Analytics Platform**.
 
 ---
 
-## 🎯 Tổng Quan Năng Lực Dự Án (Core Competencies)
+## 🎯 Định Vị Dự Án & Năng Lực Cốt Lõi
 
-`Data Ingestion` · `Incremental ETL Pipeline` · `Medallion Lakehouse Design` · `Kimball Dimensional Modeling (SCD Type 2)` · `Data Quality & Quarantine Control` · `Rule-based Analytics (RFM & Pareto ABC)` · `NoSQL Serving (MongoDB)` · `BI Integration (Power BI ODBC)` · `Unit & Contract Testing (Pytest)` · `Scalability Benchmark` · `CLI Tooling`
+**Tiêu đề chuẩn cho Hồ sơ:**
+> **GlobalCart Lakehouse Analytics Platform — Incremental PySpark/Delta Data Engineering & BI**
+
+**Mô tả một câu (Elevator Pitch):**
+> *Built a production-oriented PySpark/Delta Lake ecommerce analytics platform implementing Medallion architecture, quarantine-based data quality, incremental upserts, Kimball star-schema modeling, SCD Type 2 customer history, 12 analytical marts, reconciliation tests, and Power BI serving.*
+
+**Pipeline Canonical tóm tắt:**
+$$\text{Raw Ecommerce Data} \longrightarrow \text{Bronze Delta} \longrightarrow \text{Data Quality \& Quarantine} \longrightarrow \text{Silver MERGE} \longrightarrow \text{Kimball Fact + SCD2 Dimensions} \longrightarrow \text{Gold Marts} \longrightarrow \text{Reconciliation Gate} \longrightarrow \text{Hive / Power BI / MongoDB}$$
 
 ---
 
 ## 📝 CV Bullet Points (Đưa Vào CV)
 
 ### Tiếng Việt
-- **Xây dựng hệ thống Medallion Data Lakehouse** (Bronze - Silver - Gold) xử lý dữ liệu giao dịch thương mại điện tử bằng **PySpark, Delta Lake và HDFS**; tích hợp **Data Quality Gate** tự động phân lập bản ghi lỗi vào **Quarantine Table Delta**.
-- **Thiết kế mô hình sao Kimball** (1 Fact, 7 Dimensions) hỗ trợ **SCD Type 2 (Slowly Changing Dimensions)** và **12 Data Marts chuyên sâu** (**RFM Customer Segmentation** & **Pareto ABC Analysis**) cho Power BI và MongoDB.
-- **Phát triển Incremental Pipeline & Scalability Benchmark**: Xử lý nạp dữ liệu vi mô với **Delta MERGE INTO**; đo lường hiệu năng mở rộng tuyến tính từ 10K đến 1M+ bản ghi (**Benchmark Report: docs/BENCHMARK.md**).
-- **Đảm bảo chất lượng & bảo trì**: Cấu hình môi trường tập trung, hỗ trợ Local/HDFS Hybrid Mode, kiểm thử hợp đồng (Contract Testing) đảm bảo 100% nhất quán giữa Pandas và Spark với bộ Pytest tự động.
+- **Xây dựng Nền tảng Lakehouse Thương Mại Điện Tử** theo kiến trúc Medallion (Bronze - Silver - Gold) bằng **PySpark, Delta Lake và HDFS**; tích hợp **Data Quality Gate** tự động phân lập bản ghi lỗi vào **Quarantine Table** lưu danh sách đa lỗi (`rejection_reasons`).
+- **Hiện thực hóa Quy Trình Xử Lý Tăng Tiến (Incremental Pipeline)**: Tách bạch chế độ Bootstrap (Full Refresh) và Incremental (Silver MERGE theo khóa duy nhất `Order_Line_ID` kèm Deterministic Gold Refresh); đảm bảo tính Idempotency qua Ingestion Batch Registry.
+- **Thiết kế Kho Dữ Liệu Kimball Star Schema** (1 Fact, 7 Dimensions) với **SCD Type 2** áp dụng giải thuật Event-Ordered Change Detection xử lý chính xác chuỗi trạng thái $A \to B \to A$ và bảo đảm đúng 1 bản ghi hiện hành.
+- **Xây dựng Data Reconciliation Gate**: Tự động kiểm toán 5 bất biến toán học (Bảo toàn doanh thu 3 tầng, bảo toàn số dòng $Raw = Valid + Invalid + Duplicate$, tính duy nhất của Grain, và toàn vẹn khóa ngoại) trước khi chứng nhận phục vụ BI.
+- **Đồng bộ Tầng Phục Vụ (Serving Layer)**: Đăng ký bảng Delta vào Hive Metastore để phục vụ **Power BI** qua Spark Thrift Server (ODBC/DirectQuery) và đồng bộ sang **MongoDB** theo Gold-only Serving Contract cho ứng dụng vận hành.
+- **Thực thi Scalability Benchmark**: Xây dựng bộ sinh dữ liệu Spark-native đo lường thông lượng mở rộng từ 10K đến 1M dòng (đạt throughput ~10.5K dòng/s trên máy trạm đơn nút, lưu manifest JSON chi tiết).
 
 ### English
-- **Engineered an End-to-End Medallion Data Lakehouse** (Bronze, Silver, Gold) using **PySpark, Delta Lake, and HDFS** featuring automated Data Quality Gates and a **Delta Quarantine Table** for invalid records.
-- **Implemented a Kimball Star Schema** (1 Fact, 7 Dimensions) with **SCD Type 2** support and **12 Data Marts** including **RFM Customer Segmentation** and **Pareto ABC Product Analysis** serving Power BI and MongoDB.
-- **Built Incremental Ingestion & Scalability Benchmarks**: Enabled micro-batch processing with **Delta MERGE INTO** and validated linear performance scaling from 10K up to 1M+ records (**Benchmark Report: docs/BENCHMARK.md**).
-- **Ensured High Code Quality & Maintainability**: Developed modular package architecture, Local/HDFS hybrid execution modes, centralized settings management, and automated Pytest contract test suites.
+- **Architected a Production-Oriented Ecommerce Lakehouse** (Bronze, Silver, Gold) using **PySpark, Delta Lake, and HDFS**, featuring automated Data Quality Gates and a multi-error **Delta Quarantine Table** preserving detailed rejection reasons.
+- **Implemented Incremental Ingestion & Silver MERGE**: Engineered a dual-mode pipeline (Bootstrap Full Refresh vs Incremental Micro-batch) with line-item grain MERGE (`Order_Line_ID`) and an Ingestion Batch Registry ensuring strict idempotency.
+- **Engineered Kimball Star Schema with SCD Type 2**: Developed event-ordered change detection with window lag functions to accurately model customer state transitions ($A \to B \to A$) with temporal non-overlapping $[ValidFrom, ValidTo)$ intervals.
+- **Built an Automated Data Reconciliation Gate**: Formulated automated invariant audits verifying 3-tier financial consistency ($\sum \text{Silver} = \sum \text{Fact} = \text{Overview Mart}$), row conservation ($Raw = Valid + Invalid + Duplicate$), and foreign key completeness.
+- **Unified Dual Serving Layer**: Configured Hive Metastore cataloging for **Power BI** via Spark Thrift Server (ODBC/DirectQuery) and enforced a Gold-only serving contract for **MongoDB** operational document stores.
+- **Conducted Scalability Benchmark**: Developed a Spark-native synthetic dataset generator evaluating throughput from 10K to 1M rows (~10,500 rows/s single-node throughput, automated JSON environment manifests).
 
 ---
 
-## 🗣️ Câu Chuyện Phỏng Vấn Theo Mô Hình STAR (STAR Story)
+## 🗣️ 5 Điểm Nhấn Đắt Giá Trong Phỏng Vấn Kỹ Thuật (Technical Deep-Dive)
 
-### 📌 Situational Context (Bối cảnh):
-Một dự án thương mại điện tử lớn có nhiều nguồn dữ liệu thô, báo cáo BI thường bị chậm do tính toán lại toàn bộ dữ liệu chi tiết, đồng thời có sự lệch số liệu giữa bộ phận Marketing (RFM) và Kho vận (Pareto ABC).
+### 1. Kế Toán Trùng Lặp vs Vi Phạm Chất Lượng (Duplicate vs Quarantine Accounting)
+> **Câu hỏi:** *Làm thế nào bạn phân biệt giữa dữ liệu duplicate và dữ liệu không hợp lệ?*
+> **Trả lời:** Nhiều pipeline mắc lỗi tính `raw_count - clean_count` và gọi toàn bộ là quarantine/reject. Trong dự án này, tôi tách bạch hai bước: lọc duplicate ở tầng nguồn bằng `dropDuplicates()`, ghi nhận `duplicate_count`, sau đó mới chạy bộ quy tắc Data Contract trên dữ liệu đã deduplicate để xác định `invalid_count`. Hệ thống luôn bảo đảm định luật bảo toàn tuyệt đối:
+> $$\text{Raw Count} = \text{Clean Valid Count} + \text{Quarantined Count} + \text{Duplicate Count}$$
 
-### 🎯 Task (Nhiệm vụ):
-Xây dựng pipeline ETL phân tán chuẩn hóa dữ liệu từ thô đến báo cáo, bảo đảm chất lượng dữ liệu khắt khe, đồng nhất 100% quy tắc phân tích và phục vụ dữ liệu ổn định cho cả hệ sinh thái BI (Power BI) lẫn ứng dụng NoSQL (MongoDB).
+### 2. Thuật Toán SCD Type 2 Xử Lý State Flip ($A \to B \to A$)
+> **Câu hỏi:** *Tại sao không dùng `groupBy(Customer_ID, attributes).agg(min(Order_Date))` cho SCD Type 2?*
+> **Trả lời:** Cách làm `groupBy` đơn thuần sẽ gộp tất cả các lần xuất hiện cùng một trạng thái. Nếu khách hàng là *Consumer* vào tháng 1, chuyển sang *Corporate* vào tháng 4, rồi quay lại *Consumer* vào tháng 7, `groupBy` sẽ gộp tháng 1 và tháng 7 thành 1 phiên bản, làm mất giai đoạn giữa. Tôi đã sử dụng giải thuật **Event-Ordered Change Detection**: sắp xếp giao dịch theo ngày, dùng `lag()` để phát hiện thay đổi thuộc tính, cộng dồn tạo `change_group` (Island Grouping), từ đó sinh chính xác 3 phiên bản riêng biệt với các khoảng $[ValidFrom, ValidTo)$ liên tục và duy nhất 1 bản ghi `Is_Current = 1`.
 
-### ⚙️ Action (Hành động):
-1. Thiết kế **Medallion Lakehouse** 3 tầng với **Delta Lake**: Bronze (raw copy), Silver (cleaned & enriched, quarantine rows), Gold (Kimball Star Schema & 12 Data Marts).
-2. Xây dựng **Data Quality Gate / Data Contract** để phát hiện dữ liệu lỗi và lưu vào **Quarantine Table** Delta kèm lý do vi phạm (`rejection_reason`) và thời gian (`rejected_at`).
-3. Khắc phục nguy cơ duplicate Fact bằng cách áp dụng **Deduplication 1 Customer_ID = 1 Record** và hỗ trợ **SCD Type 2**.
-4. Chuẩn hóa quy tắc phân tích RFM & ABC vào engine tập trung (`analytics_rules.py`), kiểm chứng bằng **Contract Tests** tự động giữa Pandas và PySpark.
-5. Triển khai **Incremental Pipeline** sử dụng Delta `MERGE INTO` và thực thi **Synthetic Scalability Benchmark** (10K - 1M rows).
+### 3. Line-Item Identity Trong Silver MERGE
+> **Câu hỏi:** *Khóa MERGE của bạn tại tầng Silver là gì và tại sao không chỉ dùng `(Order_ID, Product_Name)`?*
+> **Trả lời:** Trong bán lẻ, một đơn hàng hoàn toàn có thể chứa nhiều dòng có cùng một SKU (ví dụ: dòng 1 là sản phẩm chính, dòng 2 là quà tặng kèm hoặc cùng mã nhưng mua giá ưu đãi riêng). Nếu chỉ MERGE theo `(Order_ID, Product_Name)`, Delta Lake sẽ gặp rủi ro conflation. Tôi đã chuẩn hóa Data Contract với trường `Order_Line_ID` (kết hợp `Order_ID` và line sequence ổn định), bảo đảm phép MERGE luôn chuẩn xác 100% ở cấp dòng.
 
-### 🏆 Result (Kết quả):
-- Loại bỏ hoàn toàn rủi ro trùng lặp số liệu Fact sales.
-- Bảo đảm 100% đồng nhất phân hạng RFM và ABC giữa các phòng ban.
-- Benchmark chứng minh tốc độ xử lý mở rộng tuyến tính và sẵn sàng phục vụ báo cáo Power BI realtime qua Hive Thrift Server.
+### 4. Bất Biến Kiểm Toán Dữ Liệu (Data Reconciliation Invariants)
+> **Câu hỏi:** *Làm sao bạn chứng minh được dữ liệu trên Power BI và MongoDB không bị lệch so với dữ liệu nguồn?*
+> **Trả lời:** Tôi xây dựng mô-đun `lakehouse.reconciliation` đóng vai trò là Certification Gate. Trước khi dữ liệu được cấp phép phục vụ, hệ thống chạy 5 kiểm toán tự động: kiểm tra tổng doanh thu Silver = FactSales = Mart Overview (dung sai $< 0.01$), kiểm tra không có khóa ngoại NULL, kiểm tra tính duy nhất của Grain, và kiểm tra tính toàn vẹn SCD2. Nếu kiểm toán không đạt `PASS`, hệ thống sẽ từ chối cập nhật serving pointer.
+
+### 5. Lựa Chọn Phân Hạng Pareto ABC Bằng `Cumulative_Before_Percent`
+> **Câu hỏi:** *Tại sao bạn dùng doanh thu tích lũy trước sản phẩm thay vì sau sản phẩm trong phân loại ABC?*
+> **Trả lời:** Khi một sản phẩm có doanh thu lớn làm cho tỷ trọng tích lũy vượt qua ngưỡng 80% (ví dụ từ 75% lên 85%), nếu kiểm tra cumulative-after, sản phẩm đó sẽ bị đẩy xuống Class B. Sử dụng `Cumulative_Before_Percent` giúp giữ sản phẩm đó ở Class A vì khi bắt đầu xét đến nó, danh mục vẫn nằm trong nhóm 80% doanh số đầu bảng, phản ánh đúng hơn bản chất đóng góp giá trị của sản phẩm.
 
 ---
 
-## 🔗 Liên Kết Tài Liệu Liên Quan
-- 📘 [Giải thích Kiến trúc & Quyết định Kỹ thuật](file:///d:/hoc/can%20lam/Project%20c%C3%A1%20nh%C3%A2n/GlobalEcommerceBigData/GlobalEcommerceBigData/docs/ARCHITECTURE.md)
-- 📖 [Data Dictionary & Định nghĩa KPI](file:///d:/hoc/can%20lam/Project%20c%C3%A1%20nh%C3%A2n/GlobalEcommerceBigData/GlobalEcommerceBigData/docs/DATA_DICTIONARY.md)
-- 📈 [Báo cáo Scalability Benchmark](file:///d:/hoc/can%20lam/Project%20c%C3%A1%20nh%C3%A2n/GlobalEcommerceBigData/GlobalEcommerceBigData/docs/BENCHMARK.md)
-- 📊 [Báo cáo Business Insights tự động](file:///d:/hoc/can%20lam/Project%20c%C3%A1%20nh%C3%A2n/GlobalEcommerceBigData/GlobalEcommerceBigData/docs/BUSINESS_INSIGHTS.md)
+## 🔗 Liên Kết Tài Liệu Kỹ Thuật
+- 📘 [Kiến Trúc & Quyết Định Kỹ Thuật (docs/ARCHITECTURE.md)](file:///d:/hoc/can%20lam/Project%20c%C3%A1%20nh%C3%A2n/GlobalEcommerceBigData/GlobalEcommerceBigData/docs/ARCHITECTURE.md)
+- 📖 [Data Contracts & Từ Điển Chỉ Số (docs/DATA_DICTIONARY.md)](file:///d:/hoc/can%20lam/Project%20c%C3%A1%20nh%C3%A2n/GlobalEcommerceBigData/GlobalEcommerceBigData/docs/DATA_DICTIONARY.md)
+- 📈 [Báo Cáo Benchmark Khả Năng Mở Rộng (docs/BENCHMARK.md)](file:///d:/hoc/can%20lam/Project%20c%C3%A1%20nh%C3%A2n/GlobalEcommerceBigData/GlobalEcommerceBigData/docs/BENCHMARK.md)
+- 📊 [Báo Cáo Phân Tích Kinh Doanh Tự Động (docs/BUSINESS_INSIGHTS.md)](file:///d:/hoc/can%20lam/Project%20c%C3%A1%20nh%C3%A2n/GlobalEcommerceBigData/GlobalEcommerceBigData/docs/BUSINESS_INSIGHTS.md)

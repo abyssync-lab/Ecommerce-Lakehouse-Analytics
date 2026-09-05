@@ -1,8 +1,11 @@
 """Script đồng bộ dữ liệu từ tầng Gold Delta Lake sang MongoDB Collections.
 
-Đọc dữ liệu trực tiếp từ Gold Data Marts để đảm bảo Power BI, Spark và MongoDB cùng dùng chung
-một nguồn dữ liệu nhất quán (Single Source of Truth), phục vụ các ứng dụng operational có độ trễ thấp.
+SERVING CONTRACT (GOLD-ONLY):
+MongoDB là kho lưu trữ thứ cấp (Secondary Operational Document Store) phục vụ ứng dụng web / microservices
+với độ trễ thấp (low latency document lookup), KHÔNG PHẢI nguồn chân lý phân tích thay thế Power BI.
+Đọc dữ liệu 100% từ Gold Data Marts để đảm bảo Single Source of Truth tuyệt đối xuyên suốt nền tảng.
 """
+
 
 from __future__ import annotations
 
@@ -174,7 +177,12 @@ def main() -> None:
                 f"{SETTINGS.gold_marts_base}/mart_abc_product_analysis_delta",
                 ["Product_Name", "ABC_Class"],
             ),
+            "Gold_OrderSummary": (
+                f"{SETTINGS.gold_marts_base}/mart_order_summary_delta",
+                ["Order_ID", "Customer_ID"],
+            ),
         }
+
 
         for name, (path, indexes) in sources.items():
             full_path = SETTINGS.get_storage_path(path)

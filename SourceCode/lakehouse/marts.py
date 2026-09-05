@@ -9,10 +9,12 @@ from analytics_rules import (
     ABC_CLASS_A,
     ABC_CLASS_B,
     ABC_CLASS_C,
+    ABC_RULE_VERSION,
     RFM_AT_RISK,
     RFM_CASUAL,
     RFM_CHAMPIONS,
     RFM_LOYAL,
+    RFM_RULE_VERSION,
 )
 from pyspark.sql.functions import avg, col, countDistinct, date_format, datediff, lit, round, when
 from pyspark.sql.functions import max as spark_max
@@ -22,6 +24,7 @@ from pyspark.sql.window import Window
 from .dimensions import add_surrogate_key
 
 LOGGER = logging.getLogger(__name__)
+
 
 
 def build_fact_sales(
@@ -53,15 +56,21 @@ def build_fact_sales(
     fact = fact.join(dimensions["dim_shipping"], on=["Shipping_Method", "Delivery_Level"], how="left")
     fact = fact.join(dimensions["dim_order_status"], on=["Order_Status", "Is_Returned", "Is_Cancelled"], how="left")
 
+    order_cols = ["Order_ID"]
+    if "Order_Line_ID" in fact.columns:
+        order_cols.append("Order_Line_ID")
+    order_cols.extend(["ProductKey", "CustomerKey", "DateKey"])
+
     fact = add_surrogate_key(
         fact,
         "SalesKey",
-        ["Order_ID", "ProductKey", "CustomerKey", "DateKey"],
+        order_cols,
     )
 
-    fact_sales = fact.select(
-        "SalesKey",
-        "Order_ID",
+    fact_cols = ["SalesKey", "Order_ID"]
+    if "Order_Line_ID" in fact.columns:
+        fact_cols.append("Order_Line_ID")
+    fact_cols.extend([
         "DateKey",
         "CustomerKey",
         "LocationKey",
@@ -77,7 +86,9 @@ def build_fact_sales(
         "Profit",
         "Profit_Margin_Percent",
         "Shipping_Cost",
-    )
+    ])
+
+    fact_sales = fact.select(*fact_cols)
 
     LOGGER.info("FactSales đã được khởi tạo thành công (%d dòng).", fact_sales.count())
     return fact_sales
@@ -130,7 +141,7 @@ def build_rfm_mart(clean_df: Any, analysis_date: str | None = None) -> Any:
         .when(col("Frequency") >= 3, RFM_LOYAL)
         .when(col("Recency") > 90, RFM_AT_RISK)
         .otherwise(RFM_CASUAL),
-    ).orderBy(col("Monetary").desc())
+    ).withColumn("Rule_Version", lit(RFM_RULE_VERSION)).orderBy(col("Monetary").desc())
 
     return rfm_mart
 
@@ -165,15 +176,31 @@ def build_abc_mart(clean_df: Any) -> Any:
             .when(col("Cumulative_Before_Percent") < 95.0, ABC_CLASS_B)
             .otherwise(ABC_CLASS_C),
         )
+        .withColumn("Rule_Version", lit(ABC_RULE_VERSION))
         .orderBy(col("Total_Revenue").desc())
     )
 
     return abc_mart
 
 
+def build_mart_order_summary(clean_df: Any) -> Any:
+    """Xây dựng Data Mart tổng hợp ở mức Đơn Hàng (Order Grain), phân tách rành mạch với FactSales (Line-Item Grain)."""
+    return (
+        clean_df.groupBy("Order_ID", "Order_Date", "Customer_ID", "Order_Status")
+        .agg(
+            spark_sum("Quantity").alias("Total_Items"),
+            round(spark_sum("Revenue"), 2).alias("Order_Total_Revenue"),
+            round(spark_sum("Cost"), 2).alias("Order_Total_Cost"),
+            round(spark_sum("Profit"), 2).alias("Order_Total_Profit"),
+            round(spark_sum("Shipping_Cost"), 2).alias("Order_Shipping_Cost"),
+        )
+        .orderBy(col("Order_Total_Revenue").desc())
+    )
+
+
 def build_all_marts(clean_df: Any) -> dict[str, Any]:
-    """Tạo toàn bộ 12 Data Marts tổng hợp cho tầng Gold."""
-    LOGGER.info("Bắt đầu xây dựng 12 Gold Data Marts...")
+    """Tạo toàn bộ Gold Data Marts tổng hợp cho tầng Gold."""
+    LOGGER.info("Bắt đầu xây dựng Gold Data Marts...")
 
     overview = clean_df.agg(
         countDistinct("Order_ID").alias("Total_Orders"),
@@ -188,6 +215,7 @@ def build_all_marts(clean_df: Any) -> dict[str, Any]:
 
     marts = {
         "mart_overview": overview,
+        "mart_order_summary": build_mart_order_summary(clean_df),
         "mart_revenue_by_region": aggregate_sales(clean_df, ["Region"]).orderBy(col("Total_Revenue").desc()),
         "mart_revenue_by_country": aggregate_sales(clean_df, ["Region", "Country"]).orderBy(col("Total_Revenue").desc()),
         "mart_revenue_by_category": aggregate_sales(clean_df, ["Category", "Sub_Category"], include_quantity=True).orderBy(col("Total_Revenue").desc()),
@@ -219,5 +247,6 @@ def build_all_marts(clean_df: Any) -> dict[str, Any]:
         "mart_abc_product_analysis": build_abc_mart(clean_df),
     }
 
-    LOGGER.info("Đã tạo hoàn tất 12 Gold Data Marts.")
+    LOGGER.info("Đã tạo hoàn tất Gold Data Marts.")
     return marts
+
