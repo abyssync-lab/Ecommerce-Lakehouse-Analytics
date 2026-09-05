@@ -94,10 +94,11 @@ def test_dim_customer_deduplication_prevents_fact_duplication(spark_session):
 
 
 def test_dim_customer_scd2(spark_session):
-    """Kiểm tra sinh bảng SCD Type 2 cho dim_customer."""
+    """Kiểm tra SCD Type 2 xử lý chính xác khách hàng chuyển đổi trạng thái lặp lại (A -> B -> A)."""
     data = [
         ("ORD01", "2026-01-01", "C001", "Male", "Consumer"),
         ("ORD02", "2026-06-01", "C001", "Male", "Corporate"),
+        ("ORD03", "2026-10-01", "C001", "Male", "Consumer"),  # Quay lại Consumer
     ]
     cols = ["Order_ID", "Order_Date", "Customer_ID", "Customer_Gender", "Customer_Segment"]
     df = spark_session.createDataFrame(data, cols)
@@ -106,15 +107,36 @@ def test_dim_customer_scd2(spark_session):
     assert "ValidFrom" in scd2_df.columns
     assert "ValidTo" in scd2_df.columns
     assert "Is_Current" in scd2_df.columns
-    assert scd2_df.count() == 2
+
+    # Phải tạo 3 phiên bản riêng biệt (không bị groupBy làm gộp 2 lần Consumer)
+    assert scd2_df.count() == 3
+
+    records = scd2_df.orderBy("ValidFrom").collect()
+    # Version 1: Consumer (2026-01-01 -> 2026-06-01, not current)
+    assert records[0]["Customer_Segment"] == "Consumer"
+    assert str(records[0]["ValidFrom"]) == "2026-01-01"
+    assert str(records[0]["ValidTo"]) == "2026-06-01"
+    assert records[0]["Is_Current"] == 0
+
+    # Version 2: Corporate (2026-06-01 -> 2026-10-01, not current)
+    assert records[1]["Customer_Segment"] == "Corporate"
+    assert str(records[1]["ValidFrom"]) == "2026-06-01"
+    assert str(records[1]["ValidTo"]) == "2026-10-01"
+    assert records[1]["Is_Current"] == 0
+
+    # Version 3: Consumer (2026-10-01 -> 9999-12-31, current)
+    assert records[2]["Customer_Segment"] == "Consumer"
+    assert str(records[2]["ValidFrom"]) == "2026-10-01"
+    assert str(records[2]["ValidTo"]) == "9999-12-31"
+    assert records[2]["Is_Current"] == 1
 
 
 def test_revenue_per_order_window_and_quarantine(spark_session, tmp_path):
-    """Kiểm tra Revenue_Per_Order được cộng dồn theo Order_ID và phân lập Quarantine."""
+    """Kiểm tra Order_Total_Revenue được cộng dồn theo Order_ID và phân lập Quarantine lưu đa lỗi."""
     data = [
         ("ORD01", "2026-08-01", 2026, 8, "C001", "Laptop", "Electronics", "Tech", 1, 1000.0, 0.0, 1000.0, 700.0, 300.0, 20.0, 2, "Delivered"),
         ("ORD01", "2026-08-01", 2026, 8, "C001", "Mouse", "Electronics", "Tech", 2, 25.0, 0.0, 50.0, 30.0, 20.0, 5.0, 1, "Delivered"),
-        ("ORD_BAD", "2026-08-01", 2026, 8, "C002", "Mouse", "Electronics", "Tech", -1, 25.0, 0.0, 50.0, 30.0, 20.0, 5.0, 1, "Delivered"), # invalid qty
+        ("ORD_BAD", "2026-08-01", 2026, 8, "C002", "Mouse", "Electronics", "Tech", -1, 25.0, 2.5, 50.0, 30.0, 20.0, 5.0, 1, "Delivered"), # invalid qty AND invalid discount
     ]
     cols = [
         "Order_ID", "Order_Date", "Year", "Month", "Customer_ID", "Product_Name", "Category", "Sub_Category",
@@ -129,6 +151,10 @@ def test_revenue_per_order_window_and_quarantine(spark_session, tmp_path):
     # Valid rows must be 2
     assert clean_df.count() == 2
 
-    # Revenue_Per_Order for ORD01 must be 1000.0 + 50.0 = 1050.0
-    ord01_rev = clean_df.filter(col("Order_ID") == "ORD01").select("Revenue_Per_Order").collect()[0][0]
+    # Order_Total_Revenue for ORD01 must be 1000.0 + 50.0 = 1050.0
+    ord01_rev = clean_df.filter(col("Order_ID") == "ORD01").select("Order_Total_Revenue").collect()[0][0]
     assert ord01_rev == 1050.0
+
+    # Backward compatibility alias
+    ord01_rev_alias = clean_df.filter(col("Order_ID") == "ORD01").select("Revenue_Per_Order").collect()[0][0]
+    assert ord01_rev_alias == 1050.0

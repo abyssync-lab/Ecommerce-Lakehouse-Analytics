@@ -106,12 +106,20 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Kích hoạt mô hình hóa SCD Type 2 cho bảng Dimension Customer",
     )
+    pipeline_parser.add_argument(
+        "--demo",
+        action="store_true",
+        help="Chạy kèm các bài demo Delta Lake (Time Travel, Schema Enforcement an toàn)",
+    )
 
+    commands.add_parser(
+        "delta-demo", help="🧪 Khởi chạy các kịch bản thử nghiệm Delta Lake (Time Travel, Schema Enforcement cô lập)"
+    )
     commands.add_parser(
         "benchmark", help="📈 Khởi chạy Synthetic Scalability Benchmark (10K, 100K, 1M rows)"
     )
     commands.add_parser(
-        "mongodb", help="🍃 Đồng bộ các bảng Silver & Gold Delta Lake sang MongoDB Collections"
+        "mongodb", help="🍃 Đồng bộ các bảng Gold Analytics / Serving sang MongoDB Collections"
     )
     commands.add_parser(
         "thrift", help="🔌 Khởi động Spark Thrift Server kết nối Power BI qua ODBC/JDBC"
@@ -146,14 +154,22 @@ def main(arguments: list[str] | None = None) -> int:
         benchmark_script = PROJECT_ROOT / "scripts" / "benchmark_scalability.py"
         return subprocess.run([sys.executable, str(benchmark_script)], cwd=PROJECT_ROOT, check=False).returncode
 
+    if args.command == "delta-demo":
+        LOGGER.info("Khởi chạy kịch bản thử nghiệm Delta Lake...")
+        return run_python("SparkEcommerceAnalysis.py", arguments=["--demo"])
+
     if args.command == "pipeline":
         env_vars = {}
+        script_args = []
         if getattr(args, "local", False):
             env_vars["ECOMMERCE_USE_LOCAL_STORAGE"] = "true"
         if getattr(args, "scd2", False):
             env_vars["ECOMMERCE_USE_SCD2"] = "true"
+            script_args.append("--scd2")
+        if getattr(args, "demo", False):
+            script_args.append("--demo")
         LOGGER.info("Khởi chạy Spark Lakehouse Pipeline (Local=%s, SCD2=%s)...", env_vars.get("ECOMMERCE_USE_LOCAL_STORAGE", "false"), env_vars.get("ECOMMERCE_USE_SCD2", "false"))
-        return run_python("SparkEcommerceAnalysis.py", env_vars=env_vars)
+        return run_python("SparkEcommerceAnalysis.py", arguments=script_args, env_vars=env_vars)
 
     script_by_command = {
         "report": "generate_portfolio_report.py",

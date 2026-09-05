@@ -1,7 +1,7 @@
-"""Script đồng bộ dữ liệu từ tầng Silver và Gold Delta Lake sang MongoDB.
+"""Script đồng bộ dữ liệu từ tầng Gold Delta Lake sang MongoDB Collections.
 
-Đọc dữ liệu trực tiếp từ Delta Lake để đảm bảo Power BI, Spark và MongoDB cùng dùng chung
-một nguồn dữ liệu nhất quán (Single Source of Truth), không gây sai lệch số liệu.
+Đọc dữ liệu trực tiếp từ Gold Data Marts để đảm bảo Power BI, Spark và MongoDB cùng dùng chung
+một nguồn dữ liệu nhất quán (Single Source of Truth), phục vụ các ứng dụng operational có độ trễ thấp.
 """
 
 from __future__ import annotations
@@ -141,18 +141,6 @@ def main() -> None:
         database = client[SETTINGS.mongo_database]
 
         sources = {
-            "Orders": (
-                SETTINGS.silver_delta,
-                [
-                    "Order_ID",
-                    "Order_Date",
-                    "Customer_ID",
-                    "Region",
-                    "Country",
-                    "Category",
-                    "Order_Status",
-                ],
-            ),
             "Gold_Overview": (f"{SETTINGS.gold_marts_base}/mart_overview_delta", []),
             "Gold_RevenueByRegion": (
                 f"{SETTINGS.gold_marts_base}/mart_revenue_by_region_delta",

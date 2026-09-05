@@ -40,12 +40,14 @@ def check_delta_log_exists(spark: Any, path: str) -> bool:
     return fs.exists(jvm_path)
 
 
-def save_and_verify_delta(dataframe: Any, path: str, table_label: str) -> None:
+def save_and_verify_delta(
+    dataframe: Any, path: str, table_label: str, mode: str = "overwrite"
+) -> None:
     """Ghi Delta Table và xác nhận transaction log `_delta_log` đã được tạo thành công."""
-    save_delta(dataframe, path)
+    save_delta(dataframe, path, mode=mode)
     if not check_delta_log_exists(dataframe.sparkSession, path):
         raise RuntimeError(f"{table_label} tại {path} không tạo được _delta_log!")
-    LOGGER.info("Xác nhận ghi Delta Table thành công: %s tại %s", table_label, path)
+    LOGGER.info("Xác nhận ghi Delta Table thành công (%s): %s tại %s", mode, table_label, path)
 
 
 def register_hive_table(spark: Any, path: str, table_name: str) -> None:
@@ -78,14 +80,26 @@ def show_delta_history(spark: Any, path: str, table_name: str) -> None:
     delta_table.history().show(truncate=False)
 
 
-def check_schema_enforcement(spark: Any, silver_path: str) -> None:
-    """Thử nghiệm tính năng Schema Enforcement của Delta Lake."""
-    LOGGER.info("=== KIỂM TRA SCHEMA ENFORCEMENT ===")
+def check_schema_enforcement(spark: Any, test_path: str | None = None) -> None:
+    """Thử nghiệm tính năng Schema Enforcement của Delta Lake trên bảng thử nghiệm độc lập.
+
+    Tuyệt đối không chạy test này trên bảng Silver / Gold production để tránh rủi ro ghi dữ liệu sai.
+    """
+    LOGGER.info("=== KIỂM TRA SCHEMA ENFORCEMENT TRÊN BẢNG THỬ NGHIỆM CÔ LẬP ===")
+    target_path = resolve_path(test_path or SETTINGS.temp_test_delta)
+
+    # 1. Tạo bảng mẫu hợp lệ ban đầu (Revenue là kiểu Double)
+    base_df = spark.createDataFrame(
+        [("ORDER_BASE_001", 150.0)], ["Order_ID", "Revenue"]
+    )
+    base_df.write.format("delta").mode("overwrite").option("overwriteSchema", "true").save(target_path)
+
+    # 2. Thử nghiệm append dữ liệu với kiểu dữ liệu xung đột (Revenue là String 'SAI_SCHEMA')
     wrong_schema_df = spark.createDataFrame(
         [("BAD_ORDER_001", "SAI_SCHEMA")], ["Order_ID", "Revenue"]
     )
     try:
-        wrong_schema_df.write.format("delta").mode("append").save(resolve_path(silver_path))
+        wrong_schema_df.write.format("delta").mode("append").save(target_path)
         LOGGER.warning("CẢNH BÁO: Dữ liệu sai schema đã ghi được. Cần kiểm tra lại cấu hình Delta.")
     except Exception as e:
         LOGGER.info("THÀNH CÔNG: Delta Lake đã từ chối ghi dữ liệu sai schema (%s)", str(e)[:200])

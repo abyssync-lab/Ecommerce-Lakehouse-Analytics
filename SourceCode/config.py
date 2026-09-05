@@ -89,13 +89,15 @@ class Settings:
     spark_driver_host: str | None = os.getenv("SPARK_DRIVER_HOST") or os.getenv("SPARK_LOCAL_IP")
     spark_driver_bind_address: str | None = os.getenv("SPARK_DRIVER_BIND_ADDRESS")
 
-    # Đường dẫn các tầng Medallion Lakehouse (Bronze, Silver, Gold, Quarantine)
+    # Đường dẫn các tầng Medallion Lakehouse (Bronze, Silver, Gold, Quarantine, Monitoring)
     bronze_delta: str = "/ecommerce/bronze/ecommerce_raw_delta"
     silver_delta: str = "/ecommerce/silver/ecommerce_clean_delta"
     quarantine_delta: str = "/ecommerce/quarantine/rejected_rows"
     gold_star_schema_base: str = "/ecommerce/gold/star_schema"
     gold_marts_base: str = "/ecommerce/gold/marts"
+    gold_monitoring_base: str = "/ecommerce/gold/monitoring"
     lakehouse_version_delta: str = "/ecommerce/lakehouse/versioning_delta"
+    temp_test_delta: str = "/ecommerce/test/schema_enforcement_temp"
 
     def get_storage_path(self, relative_path: str) -> str:
         """Trả về đường dẫn lưu trữ phù hợp dựa trên chế độ (Local hoặc HDFS).

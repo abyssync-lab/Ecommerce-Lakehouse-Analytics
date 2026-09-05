@@ -10,6 +10,7 @@ from pyspark.sql.functions import (
     date_format,
     explode,
     expr,
+    lag,
     lead,
     lit,
     month,
@@ -22,6 +23,7 @@ from pyspark.sql.functions import (
 )
 from pyspark.sql.functions import max as spark_max
 from pyspark.sql.functions import min as spark_min
+from pyspark.sql.functions import sum as spark_sum
 from pyspark.sql.window import Window
 
 LOGGER = logging.getLogger(__name__)
@@ -65,25 +67,70 @@ def build_dim_customer(clean_df: Any, use_scd2: bool = False) -> Any:
 
 
 def build_dim_customer_scd2(clean_df: Any) -> Any:
-    """Xây dựng Dimension Customer theo chuẩn SCD Type 2 (Slowly Changing Dimension)."""
-    state_df = clean_df.groupBy("Customer_ID", "Customer_Gender", "Customer_Segment").agg(
-        spark_min("Order_Date").alias("ValidFrom")
+    """Xây dựng Dimension Customer theo chuẩn SCD Type 2 với Change-Detection Logic.
+
+    Xử lý chính xác trường hợp khách hàng chuyển đổi trạng thái lặp lại (ví dụ A -> B -> A).
+    Không dùng groupBy đơn thuần (sẽ làm mất các phiên bản lặp lại), mà phát hiện sự kiện thay đổi
+    theo thứ tự thời gian bằng lag(), đánh dấu nhóm trạng thái (change_group), sau đó tính [ValidFrom, ValidTo).
+    """
+    # 1. Trích xuất sự kiện giao dịch của khách hàng
+    order_cols = ["Order_Date"]
+    if "Order_ID" in clean_df.columns:
+        order_cols.append("Order_ID")
+
+    cust_events = clean_df.select(
+        "Customer_ID", "Customer_Gender", "Customer_Segment", *order_cols
+    ).dropDuplicates()
+
+    w_order = Window.partitionBy("Customer_ID").orderBy(*order_cols)
+
+    # 2. Phát hiện thay đổi trạng thái thuộc tính (Change Detection)
+    prev_gender = lag("Customer_Gender", 1).over(w_order)
+    prev_segment = lag("Customer_Segment", 1).over(w_order)
+
+    is_change = (
+        when(prev_gender.isNull() | prev_segment.isNull(), 1)
+        .when((col("Customer_Gender") != prev_gender) | (col("Customer_Segment") != prev_segment), 1)
+        .otherwise(0)
     )
-    
+
+    events_with_change = cust_events.withColumn("is_change", is_change)
+
+    # 3. Gom cụm các khoảng trạng thái liên tục (Island Grouping / Change Group)
+    w_cum = (
+        Window.partitionBy("Customer_ID")
+        .orderBy(*order_cols)
+        .rowsBetween(Window.unboundedPreceding, Window.currentRow)
+    )
+    events_grouped = events_with_change.withColumn("change_group", spark_sum("is_change").over(w_cum))
+
+    # 4. Xác định ValidFrom cho từng phiên bản
+    state_versions = events_grouped.groupBy(
+        "Customer_ID", "change_group", "Customer_Gender", "Customer_Segment"
+    ).agg(spark_min("Order_Date").alias("ValidFrom"))
+
+    # 5. Xác định ValidTo và Is_Current theo khoảng nửa mở [ValidFrom, ValidTo)
     w_scd = Window.partitionBy("Customer_ID").orderBy("ValidFrom")
-    
     scd_df = (
-        state_df.withColumn("NextValidFrom", lead("ValidFrom", 1).over(w_scd))
+        state_versions.withColumn("NextValidFrom", lead("ValidFrom", 1).over(w_scd))
         .withColumn(
             "ValidTo",
             when(col("NextValidFrom").isNotNull(), col("NextValidFrom")).otherwise(to_date(lit("9999-12-31"))),
         )
         .withColumn("Is_Current", when(col("NextValidFrom").isNull(), 1).otherwise(0))
-        .drop("NextValidFrom")
+        .drop("NextValidFrom", "change_group")
     )
-    
+
     scd_df = add_surrogate_key(scd_df, "CustomerKey", ["Customer_ID", "ValidFrom"])
-    return scd_df.select("CustomerKey", "Customer_ID", "Customer_Gender", "Customer_Segment", "ValidFrom", "ValidTo", "Is_Current")
+    return scd_df.select(
+        "CustomerKey",
+        "Customer_ID",
+        "Customer_Gender",
+        "Customer_Segment",
+        "ValidFrom",
+        "ValidTo",
+        "Is_Current",
+    )
 
 
 def build_dim_location(clean_df: Any) -> Any:
