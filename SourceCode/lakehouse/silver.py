@@ -5,7 +5,9 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from pyspark.sql.functions import col, to_date, when
+from pyspark.sql.functions import col, current_timestamp, lit, round, to_date, when
+from pyspark.sql.functions import sum as spark_sum
+from pyspark.sql.window import Window
 
 LOGGER = logging.getLogger(__name__)
 
@@ -43,11 +45,12 @@ def validate_silver_data(clean_df: Any, raw_count: int) -> None:
         raise ValueError("Tầng Silver không đạt chất lượng Data Contract: " + "; ".join(failed))
 
 
-def clean_and_enrich_silver(raw_df: Any) -> Any:
+def clean_and_enrich_silver(raw_df: Any, quarantine_path: str | None = None) -> Any:
     """Làm sạch, ép kiểu và tính toán các chỉ số bổ sung cho tầng Silver.
 
     Args:
         raw_df: Spark DataFrame thô từ tầng Ingestion.
+        quarantine_path: Đường dẫn tùy chọn để lưu trữ các bản ghi bị loại (Quarantine Table).
 
     Returns:
         Spark DataFrame sạch đã vượt qua Data Quality Gate.
@@ -55,13 +58,13 @@ def clean_and_enrich_silver(raw_df: Any) -> Any:
     raw_count = raw_df.count()
     LOGGER.info("Bắt đầu quy trình làm sạch dữ liệu tầng Silver...")
 
-    clean_df = raw_df.dropDuplicates()
+    typed_df = raw_df.dropDuplicates()
 
     # Ép kiểu dữ liệu
-    clean_df = clean_df.withColumn("Order_Date", to_date(col("Order_Date"), "yyyy-MM-dd"))
+    typed_df = typed_df.withColumn("Order_Date", to_date(col("Order_Date"), "yyyy-MM-dd"))
 
-    clean_df = (
-        clean_df.withColumn("Year", col("Year").cast("int"))
+    typed_df = (
+        typed_df.withColumn("Year", col("Year").cast("int"))
         .withColumn("Month", col("Month").cast("int"))
         .withColumn("Quantity", col("Quantity").cast("int"))
         .withColumn("Unit_Price", col("Unit_Price").cast("double"))
@@ -73,38 +76,74 @@ def clean_and_enrich_silver(raw_df: Any) -> Any:
         .withColumn("Shipping_Days", col("Shipping_Days").cast("int"))
     )
 
-    if "Profit_Margin_%" in clean_df.columns:
-        clean_df = clean_df.withColumnRenamed("Profit_Margin_%", "Profit_Margin_Percent")
+    if "Profit_Margin_%" in typed_df.columns:
+        typed_df = typed_df.withColumnRenamed("Profit_Margin_%", "Profit_Margin_Percent")
 
-    if "Profit_Margin_Percent" in clean_df.columns:
-        clean_df = clean_df.withColumn(
+    if "Profit_Margin_Percent" in typed_df.columns:
+        typed_df = typed_df.withColumn(
             "Profit_Margin_Percent", col("Profit_Margin_Percent").cast("double")
         )
     else:
-        clean_df = clean_df.withColumn(
+        typed_df = typed_df.withColumn(
             "Profit_Margin_Percent",
             when(col("Revenue") != 0, (col("Profit") / col("Revenue")) * 100).otherwise(0.0),
         )
 
-    # Loại bỏ các bản ghi chứa NULL tại các trường bắt buộc
-    clean_df = clean_df.dropna(
-        subset=[
-            "Order_ID",
-            "Order_Date",
-            "Year",
-            "Month",
-            "Quantity",
-            "Unit_Price",
-            "Revenue",
-            "Cost",
-            "Profit",
-            "Shipping_Cost",
-            "Shipping_Days",
-        ]
+    # Đánh giá điều kiện Hợp lệ và Phân lập Quarantine
+    required_cols = [
+        "Order_ID",
+        "Order_Date",
+        "Year",
+        "Month",
+        "Quantity",
+        "Unit_Price",
+        "Revenue",
+        "Cost",
+        "Profit",
+        "Shipping_Cost",
+        "Shipping_Days",
+    ]
+    null_cond = col("Order_ID").isNotNull()
+    for c in required_cols[1:]:
+        null_cond = null_cond & col(c).isNotNull()
+
+    business_cond = (
+        (col("Quantity") > 0)
+        & (col("Unit_Price") >= 0)
+        & (col("Discount").between(0, 1))
+        & (col("Revenue") >= 0)
+        & (col("Shipping_Days") >= 0)
     )
 
-    # Tính toán thuộc tính phái sinh
-    clean_df = clean_df.withColumn("Revenue_Per_Order", col("Revenue"))
+    is_valid = null_cond & business_cond
+
+    clean_df = typed_df.filter(is_valid)
+    rejected_df = typed_df.filter(~is_valid)
+
+    rejected_count = rejected_df.count()
+    if rejected_count > 0:
+        rejected_df = rejected_df.withColumn(
+            "rejection_reason",
+            when(~null_cond, lit("MISSING_REQUIRED_FIELDS"))
+            .when(col("Quantity") <= 0, lit("INVALID_QUANTITY"))
+            .when(col("Unit_Price") < 0, lit("INVALID_UNIT_PRICE"))
+            .when(~col("Discount").between(0, 1), lit("INVALID_DISCOUNT"))
+            .when(col("Revenue") < 0, lit("INVALID_REVENUE"))
+            .when(col("Shipping_Days") < 0, lit("INVALID_SHIPPING_DAYS"))
+            .otherwise(lit("DATA_CONTRACT_VIOLATION")),
+        ).withColumn("rejected_at", current_timestamp())
+
+        LOGGER.warning("Phát hiện %d bản ghi vi phạm Data Quality Gate. Chuyển vào Quarantine.", rejected_count)
+        if quarantine_path:
+            try:
+                rejected_df.write.format("delta").mode("append").save(quarantine_path)
+                LOGGER.info("Đã lưu %d bản ghi lỗi vào Quarantine table tại: %s", rejected_count, quarantine_path)
+            except Exception as e:
+                LOGGER.warning("Không thể lưu Quarantine table Delta: %s", e)
+
+    # Tính toán thuộc tính phái sinh đúng grain: Revenue_Per_Order là tổng revenue của Order_ID
+    order_window = Window.partitionBy("Order_ID")
+    clean_df = clean_df.withColumn("Revenue_Per_Order", round(spark_sum("Revenue").over(order_window), 2))
     clean_df = clean_df.withColumn("Net_Profit", col("Profit") - col("Shipping_Cost"))
 
     clean_df = clean_df.withColumn(

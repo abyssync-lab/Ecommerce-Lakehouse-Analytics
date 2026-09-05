@@ -101,7 +101,15 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Chạy chế độ Spark Local Storage (không cần HDFS cluster)",
     )
+    pipeline_parser.add_argument(
+        "--scd2",
+        action="store_true",
+        help="Kích hoạt mô hình hóa SCD Type 2 cho bảng Dimension Customer",
+    )
 
+    commands.add_parser(
+        "benchmark", help="📈 Khởi chạy Synthetic Scalability Benchmark (10K, 100K, 1M rows)"
+    )
     commands.add_parser(
         "mongodb", help="🍃 Đồng bộ các bảng Silver & Gold Delta Lake sang MongoDB Collections"
     )
@@ -133,11 +141,18 @@ def main(arguments: list[str] | None = None) -> int:
     if args.command == "check":
         return run_quality_checks()
 
+    if args.command == "benchmark":
+        LOGGER.info("Khởi chạy Synthetic Scalability Benchmark...")
+        benchmark_script = PROJECT_ROOT / "scripts" / "benchmark_scalability.py"
+        return subprocess.run([sys.executable, str(benchmark_script)], cwd=PROJECT_ROOT, check=False).returncode
+
     if args.command == "pipeline":
         env_vars = {}
         if getattr(args, "local", False):
             env_vars["ECOMMERCE_USE_LOCAL_STORAGE"] = "true"
-            LOGGER.info("Khởi chạy Spark Lakehouse Pipeline ở chế độ Local Storage Mode...")
+        if getattr(args, "scd2", False):
+            env_vars["ECOMMERCE_USE_SCD2"] = "true"
+        LOGGER.info("Khởi chạy Spark Lakehouse Pipeline (Local=%s, SCD2=%s)...", env_vars.get("ECOMMERCE_USE_LOCAL_STORAGE", "false"), env_vars.get("ECOMMERCE_USE_SCD2", "false"))
         return run_python("SparkEcommerceAnalysis.py", env_vars=env_vars)
 
     script_by_command = {

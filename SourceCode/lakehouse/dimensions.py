@@ -5,9 +5,23 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from pyspark.sql.functions import col, date_format, explode, expr, month, quarter, row_number, sequence, year
-from pyspark.sql.functions import min as spark_min
+from pyspark.sql.functions import (
+    col,
+    date_format,
+    explode,
+    expr,
+    lead,
+    lit,
+    month,
+    quarter,
+    row_number,
+    sequence,
+    to_date,
+    when,
+    year,
+)
 from pyspark.sql.functions import max as spark_max
+from pyspark.sql.functions import min as spark_min
 from pyspark.sql.window import Window
 
 LOGGER = logging.getLogger(__name__)
@@ -30,11 +44,46 @@ def build_dim_product(clean_df: Any) -> Any:
     return dim.select("ProductKey", "Category", "Sub_Category", "Product_Name")
 
 
-def build_dim_customer(clean_df: Any) -> Any:
-    """Xây dựng Dimension Customer."""
-    dim = clean_df.select("Customer_ID", "Customer_Gender", "Customer_Segment").dropDuplicates()
+def build_dim_customer(clean_df: Any, use_scd2: bool = False) -> Any:
+    """Xây dựng Dimension Customer (mặc định 1 Customer_ID = đúng 1 record để tránh duplicate fact, hoặc SCD2)."""
+    if use_scd2:
+        return build_dim_customer_scd2(clean_df)
+
+    if "Order_Date" in clean_df.columns:
+        w = Window.partitionBy("Customer_ID").orderBy(col("Order_Date").desc())
+        dim = (
+            clean_df.select("Customer_ID", "Customer_Gender", "Customer_Segment", "Order_Date")
+            .withColumn("rn", row_number().over(w))
+            .filter(col("rn") == 1)
+            .drop("rn", "Order_Date")
+        )
+    else:
+        dim = clean_df.select("Customer_ID", "Customer_Gender", "Customer_Segment").dropDuplicates(subset=["Customer_ID"])
+
     dim = add_surrogate_key(dim, "CustomerKey", ["Customer_ID"])
     return dim.select("CustomerKey", "Customer_ID", "Customer_Gender", "Customer_Segment")
+
+
+def build_dim_customer_scd2(clean_df: Any) -> Any:
+    """Xây dựng Dimension Customer theo chuẩn SCD Type 2 (Slowly Changing Dimension)."""
+    state_df = clean_df.groupBy("Customer_ID", "Customer_Gender", "Customer_Segment").agg(
+        spark_min("Order_Date").alias("ValidFrom")
+    )
+    
+    w_scd = Window.partitionBy("Customer_ID").orderBy("ValidFrom")
+    
+    scd_df = (
+        state_df.withColumn("NextValidFrom", lead("ValidFrom", 1).over(w_scd))
+        .withColumn(
+            "ValidTo",
+            when(col("NextValidFrom").isNotNull(), col("NextValidFrom")).otherwise(to_date(lit("9999-12-31"))),
+        )
+        .withColumn("Is_Current", when(col("NextValidFrom").isNull(), 1).otherwise(0))
+        .drop("NextValidFrom")
+    )
+    
+    scd_df = add_surrogate_key(scd_df, "CustomerKey", ["Customer_ID", "ValidFrom"])
+    return scd_df.select("CustomerKey", "Customer_ID", "Customer_Gender", "Customer_Segment", "ValidFrom", "ValidTo", "Is_Current")
 
 
 def build_dim_location(clean_df: Any) -> Any:
@@ -89,12 +138,12 @@ def build_dim_date(spark: Any, clean_df: Any) -> Any:
     return dim.select("DateKey", "FullDate", "Year", "Month", "Quarter")
 
 
-def build_all_dimensions(spark: Any, clean_df: Any) -> dict[str, Any]:
+def build_all_dimensions(spark: Any, clean_df: Any, use_scd2: bool = False) -> dict[str, Any]:
     """Tạo toàn bộ 7 bảng Dimension cho Star Schema."""
     LOGGER.info("Bắt đầu xây dựng 7 bảng Dimension Kimball Star Schema...")
     dims = {
         "dim_product": build_dim_product(clean_df),
-        "dim_customer": build_dim_customer(clean_df),
+        "dim_customer": build_dim_customer(clean_df, use_scd2=use_scd2),
         "dim_location": build_dim_location(clean_df),
         "dim_payment": build_dim_payment(clean_df),
         "dim_shipping": build_dim_shipping(clean_df),

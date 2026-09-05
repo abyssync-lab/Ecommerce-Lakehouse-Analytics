@@ -14,7 +14,7 @@ from analytics_rules import (
     RFM_CHAMPIONS,
     RFM_LOYAL,
 )
-from pyspark.sql.functions import avg, col, countDistinct, date_format, datediff, lit, round
+from pyspark.sql.functions import avg, col, countDistinct, date_format, datediff, lit, round, when
 from pyspark.sql.functions import max as spark_max
 from pyspark.sql.functions import sum as spark_sum
 from pyspark.sql.window import Window
@@ -34,7 +34,20 @@ def build_fact_sales(
     fact = clean_df.withColumn("DateKey", date_format(col("Order_Date"), "yyyyMMdd").cast("int"))
 
     fact = fact.join(dimensions["dim_product"], on=["Product_Name", "Category", "Sub_Category"], how="left")
-    fact = fact.join(dimensions["dim_customer"], on=["Customer_ID"], how="left")
+    
+    dim_cust = dimensions["dim_customer"]
+    if "ValidFrom" in dim_cust.columns and "ValidTo" in dim_cust.columns:
+        # SCD Type 2 Temporal Join
+        fact = fact.join(
+            dim_cust,
+            (fact["Customer_ID"] == dim_cust["Customer_ID"])
+            & (fact["Order_Date"] >= dim_cust["ValidFrom"])
+            & (fact["Order_Date"] < dim_cust["ValidTo"]),
+            how="left",
+        ).drop(dim_cust["Customer_ID"])
+    else:
+        # Standard SCD Type 1 Join (guaranteed 1 Customer_ID = 1 row in dim_customer)
+        fact = fact.join(dim_cust, on=["Customer_ID"], how="left")
     fact = fact.join(dimensions["dim_location"], on=["Region", "Country"], how="left")
     fact = fact.join(dimensions["dim_payment"], on=["Payment_Method"], how="left")
     fact = fact.join(dimensions["dim_shipping"], on=["Shipping_Method", "Delivery_Level"], how="left")

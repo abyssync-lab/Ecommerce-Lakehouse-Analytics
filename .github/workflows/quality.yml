@@ -18,7 +18,7 @@ jobs:
       - name: Install lightweight test dependencies
         run: python -m pip install pandas pytest ruff
       - name: Check syntax and common code issues
-        run: ruff check SourceCode/config.py SourceCode/data_quality.py SourceCode/environment_check.py SourceCode/portfolio_metrics.py SourceCode/project_cli.py SourceCode/start_thrift_server.py SourceCode/validate_input.py SourceCode/generate_portfolio_report.py tests
+        run: ruff check SourceCode tests scripts
       - name: Run unit tests
         run: python -m pytest
       - name: Validate sample data contract

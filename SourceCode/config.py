@@ -83,10 +83,16 @@ class Settings:
     # Feature Flags
     run_delta_demo: bool = _env_bool("ECOMMERCE_RUN_DELTA_DEMO", False)
     wait_before_exit: bool = _env_bool("ECOMMERCE_WAIT_BEFORE_EXIT", False)
+    use_scd2: bool = _env_bool("ECOMMERCE_USE_SCD2", False)
 
-    # Đường dẫn các tầng Medallion Lakehouse (Bronze, Silver, Gold)
+    # Spark Driver Network Configs
+    spark_driver_host: str | None = os.getenv("SPARK_DRIVER_HOST") or os.getenv("SPARK_LOCAL_IP")
+    spark_driver_bind_address: str | None = os.getenv("SPARK_DRIVER_BIND_ADDRESS")
+
+    # Đường dẫn các tầng Medallion Lakehouse (Bronze, Silver, Gold, Quarantine)
     bronze_delta: str = "/ecommerce/bronze/ecommerce_raw_delta"
     silver_delta: str = "/ecommerce/silver/ecommerce_clean_delta"
+    quarantine_delta: str = "/ecommerce/quarantine/rejected_rows"
     gold_star_schema_base: str = "/ecommerce/gold/star_schema"
     gold_marts_base: str = "/ecommerce/gold/marts"
     lakehouse_version_delta: str = "/ecommerce/lakehouse/versioning_delta"
