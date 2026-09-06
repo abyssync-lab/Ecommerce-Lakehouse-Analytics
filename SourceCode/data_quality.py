@@ -13,23 +13,29 @@ from typing import TYPE_CHECKING, Literal
 if TYPE_CHECKING:
     import pandas as pd
 
-REQUIRED_COLUMNS: set[str] = {
-    "Order_ID",
-    "Order_Date",
-    "Customer_ID",
-    "Product_Name",
-    "Quantity",
-    "Unit_Price",
-    "Discount",
-    "Revenue",
-    "Cost",
-    "Profit",
-    "Shipping_Cost",
-    "Shipping_Days",
-    "Order_Status",
-}
+try:
+    from lakehouse.contracts.loader import load_contract
 
-ALLOWED_ORDER_STATUSES: set[str] = {"Delivered", "Returned", "Cancelled", "Processing", "Shipped"}
+    _CONTRACT = load_contract()
+    REQUIRED_COLUMNS: set[str] = _CONTRACT.required_columns
+    ALLOWED_ORDER_STATUSES: set[str] = _CONTRACT.allowed_order_statuses
+except Exception:
+    REQUIRED_COLUMNS: set[str] = {
+        "Order_ID",
+        "Order_Date",
+        "Customer_ID",
+        "Product_Name",
+        "Quantity",
+        "Unit_Price",
+        "Discount",
+        "Revenue",
+        "Cost",
+        "Profit",
+        "Shipping_Cost",
+        "Shipping_Days",
+        "Order_Status",
+    }
+    ALLOWED_ORDER_STATUSES: set[str] = {"Delivered", "Returned", "Cancelled", "Processing", "Shipped"}
 
 SeverityLevel = Literal["ERROR", "WARNING"]
 

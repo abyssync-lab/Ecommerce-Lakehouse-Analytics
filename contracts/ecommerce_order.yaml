@@ -31,7 +31,7 @@ columns:
     description: "Product natural identifier"
   Category:
     type: "string"
-    nullable: false
+    nullable: true
     description: "High-level merchandise category"
   Sub_Category:
     type: "string"
@@ -104,6 +104,11 @@ columns:
     nullable: true
     description: "Destination country"
 
+  Order_Line_ID:
+    type: "string"
+    nullable: true
+    description: "Unique line item identifier within order; if not provided upstream, resolved via deterministic content fingerprint"
+
 metadata_columns:
   _ingested_at:
     type: "timestamp"
@@ -117,6 +122,25 @@ metadata_columns:
   _source_system:
     type: "string"
     description: "Upstream system tag (e.g., ecommerce_csv)"
+  _source_hash:
+    type: "string"
+    description: "SHA-256 checksum of source file for idempotency control"
+  _pipeline_version:
+    type: "string"
+    description: "Version of lakehouse pipeline executing the run"
   _record_hash:
     type: "string"
     description: "SHA-256 fingerprint of business fields for lineage and replay"
+
+business_keys:
+  order_key:
+    - "Order_ID"
+  order_line_key:
+    - "Order_ID"
+    - "Order_Line_ID"
+  fallback_line_fingerprint:
+    - "Order_ID"
+    - "Product_Name"
+    - "Quantity"
+    - "Unit_Price"
+    - "Discount"

@@ -16,9 +16,8 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from pyspark.sql.functions import col, count, countDistinct, lead
+from pyspark.sql.functions import col, count, countDistinct
 from pyspark.sql.functions import sum as spark_sum
-from pyspark.sql.window import Window
 
 LOGGER = logging.getLogger(__name__)
 

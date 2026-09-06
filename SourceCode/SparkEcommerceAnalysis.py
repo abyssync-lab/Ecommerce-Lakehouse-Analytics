@@ -17,7 +17,12 @@ import argparse
 
 from config import SETTINGS
 from lakehouse.ingestion import read_raw_csv
-from lakehouse.pipeline import create_spark_session, run_delta_demo, run_incremental_pipeline, run_pipeline
+from lakehouse.pipeline import (
+    create_spark_session,
+    run_delta_demo,
+    run_incremental_pipeline,
+    run_pipeline,
+)
 
 
 def main() -> None:
@@ -35,16 +40,18 @@ def main() -> None:
     if args.incremental:
         spark = create_spark_session()
         new_batch_df = read_raw_csv(spark, args.input)
-        spark = run_incremental_pipeline(
+        result = run_incremental_pipeline(
             new_batch_df, spark=spark, batch_id=args.batch_id, use_scd2=use_scd2
         )
+        active_spark = result.spark or spark
     else:
-        spark = run_pipeline(input_path=args.input, use_scd2=use_scd2)
+        result = run_pipeline(input_path=args.input, use_scd2=use_scd2)
+        active_spark = result.spark
 
-    if args.demo or SETTINGS.run_delta_demo:
-        run_delta_demo(spark)
-
-    spark.stop()
+    if active_spark is not None:
+        if args.demo or SETTINGS.run_delta_demo:
+            run_delta_demo(active_spark)
+        active_spark.stop()
 
 
 if __name__ == "__main__":

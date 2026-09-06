@@ -23,6 +23,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+from typing import Any
 
 # Ensure SourceCode is in sys.path
 ROOT_DIR = Path(__file__).resolve().parents[1]
@@ -35,7 +36,7 @@ from lakehouse.dimensions import build_all_dimensions
 from lakehouse.marts import build_all_marts, build_fact_sales
 from lakehouse.pipeline import create_spark_session
 from lakehouse.silver import clean_and_enrich_silver
-from pyspark.sql import DataFrame, SparkSession
+from pyspark.sql import SparkSession
 from pyspark.sql.functions import (
     col,
     concat,
@@ -43,10 +44,12 @@ from pyspark.sql.functions import (
     lit,
     lpad,
     month,
-    round as spark_round,
     to_date,
     when,
     year,
+)
+from pyspark.sql.functions import (
+    round as spark_round,
 )
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")

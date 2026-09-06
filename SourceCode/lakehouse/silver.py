@@ -12,15 +12,19 @@ from pyspark.sql.functions import (
     concat_ws,
     current_timestamp,
     lit,
+    month,
     round,
-    row_number,
     sha2,
     size,
+    substring,
     to_date,
     when,
+    year,
 )
 from pyspark.sql.functions import sum as spark_sum
 from pyspark.sql.window import Window
+
+from .contracts.loader import get_spark_silver_rules, load_contract
 
 LOGGER = logging.getLogger(__name__)
 
@@ -79,14 +83,21 @@ def validate_silver_data(
     rejected_count: int = 0,
 ) -> None:
     """Kiểm tra các quy tắc nghiệp vụ cốt lõi Data Contract sau bước làm sạch."""
+    contract = load_contract()
+    contract_rules = get_spark_silver_rules(contract)
     rules = {
-        "Order_ID không rỗng": col("Order_ID").isNotNull(),
-        "Quantity > 0": col("Quantity") > 0,
-        "Unit_Price >= 0": col("Unit_Price") >= 0,
-        "Discount trong [0, 1]": col("Discount").between(0, 1),
-        "Revenue >= 0": col("Revenue") >= 0,
-        "Shipping_Days >= 0": col("Shipping_Days") >= 0,
+        rule_name: cond
+        for rule_name, cond in contract_rules.items()
+        if any(c in clean_df.columns for c in [rule_name.split()[0]])
     }
+    # Đảm bảo các quy tắc cốt lõi luôn có mặt
+    rules.setdefault("Order_ID không rỗng", col("Order_ID").isNotNull())
+    rules.setdefault("Quantity > 0", col("Quantity") > 0)
+    rules.setdefault("Unit_Price >= 0", col("Unit_Price") >= 0)
+    rules.setdefault("Discount trong [0, 1]", col("Discount").between(0, 1))
+    rules.setdefault("Revenue >= 0", col("Revenue") >= 0)
+    rules.setdefault("Shipping_Days >= 0", col("Shipping_Days") >= 0)
+
     failed = []
     for rule_name, condition in rules.items():
         invalid_count = clean_df.filter(~condition | condition.isNull()).count()
@@ -130,19 +141,28 @@ def clean_and_enrich_silver(
     raw_count = raw_df.count()
     LOGGER.info("Bắt đầu quy trình làm sạch dữ liệu tầng Silver...")
 
-    # Deduplicate theo business grain và tính chính xác số lượng trùng lặp
-    dedup_df = raw_df.dropDuplicates()
+    # Deduplicate theo business grain (loại trừ metadata kỹ thuật) và tính chính xác số lượng trùng lặp
+    biz_cols = [c for c in raw_df.columns if not c.startswith("_")]
+    dedup_df = raw_df.dropDuplicates(subset=biz_cols) if biz_cols else raw_df.dropDuplicates()
     duplicate_count = raw_count - dedup_df.count()
     typed_df = dedup_df
-
 
     # Ép kiểu dữ liệu chuẩn
     typed_df = typed_df.withColumn("Order_Date", to_date(col("Order_Date"), "yyyy-MM-dd"))
 
+    # Tự động trích xuất Year và Month từ Order_Date nếu dữ liệu nguồn chưa có
+    if "Year" in typed_df.columns:
+        typed_df = typed_df.withColumn("Year", col("Year").cast("int"))
+    else:
+        typed_df = typed_df.withColumn("Year", year(col("Order_Date")))
+
+    if "Month" in typed_df.columns:
+        typed_df = typed_df.withColumn("Month", col("Month").cast("int"))
+    else:
+        typed_df = typed_df.withColumn("Month", month(col("Order_Date")))
+
     typed_df = (
-        typed_df.withColumn("Year", col("Year").cast("int"))
-        .withColumn("Month", col("Month").cast("int"))
-        .withColumn("Quantity", col("Quantity").cast("int"))
+        typed_df.withColumn("Quantity", col("Quantity").cast("int"))
         .withColumn("Unit_Price", col("Unit_Price").cast("double"))
         .withColumn("Discount", col("Discount").cast("double"))
         .withColumn("Revenue", col("Revenue").cast("double"))
@@ -169,8 +189,6 @@ def clean_and_enrich_silver(
     required_cols = [
         "Order_ID",
         "Order_Date",
-        "Year",
-        "Month",
         "Quantity",
         "Unit_Price",
         "Revenue",
@@ -237,11 +255,32 @@ def clean_and_enrich_silver(
     clean_df = clean_df.withColumn("Revenue_Per_Order", col("Order_Total_Revenue"))  # Alias tương thích ngược
     clean_df = clean_df.withColumn("Net_Profit", col("Profit") - col("Shipping_Cost"))
 
-    # Định danh duy nhất cho từng dòng sản phẩm trong đơn (Order-Line Grain)
+    # Định danh duy nhất cho từng dòng sản phẩm trong đơn (Order-Line Grain):
+    # - Nếu upstream cung cấp Order_Line_ID (và không rỗng), bảo toàn nguyên bản.
+    # - Nếu chưa có (dataset demo), sinh deterministic content fingerprint (Order_ID + Product_Name + Unit_Price + Quantity + Discount)
+    #   thay vì row_number() động, ngăn ngừa hoàn toàn nguy cơ đè nhầm bản ghi giữa các micro-batch MERGE.
+    contract = load_contract()
+    fp_cols = [col(c).cast("string") for c in contract.fallback_line_fingerprint_cols if c in clean_df.columns]
+    if not fp_cols:
+        fp_cols = [
+            col("Order_ID").cast("string"),
+            col("Product_Name").cast("string"),
+            col("Quantity").cast("string"),
+            col("Unit_Price").cast("string"),
+            col("Discount").cast("string"),
+        ]
+
+    line_fingerprint = substring(sha2(concat_ws("||", *fp_cols), 256), 1, 8)
+
     if "Order_Line_ID" not in clean_df.columns:
-        w_line = Window.partitionBy("Order_ID").orderBy("Product_Name", "Quantity", "Revenue")
+        clean_df = clean_df.withColumn("Order_Line_ID", concat_ws("-", col("Order_ID"), line_fingerprint))
+    else:
         clean_df = clean_df.withColumn(
-            "Order_Line_ID", concat_ws("-", col("Order_ID"), row_number().over(w_line))
+            "Order_Line_ID",
+            when(
+                col("Order_Line_ID").isNotNull() & (col("Order_Line_ID") != ""),
+                col("Order_Line_ID"),
+            ).otherwise(concat_ws("-", col("Order_ID"), line_fingerprint)),
         )
 
     clean_df = clean_df.withColumn(

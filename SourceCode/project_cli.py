@@ -117,8 +117,8 @@ def build_parser() -> argparse.ArgumentParser:
         "mode",
         nargs="?",
         default="bootstrap",
-        choices=["bootstrap", "incremental"],
-        help="Chế độ thực thi: 'bootstrap' (Full Refresh) hoặc 'incremental' (Micro-batch MERGE)",
+        choices=["bootstrap", "incremental", "reset-bootstrap"],
+        help="Chế độ thực thi: 'bootstrap' (Full Refresh), 'reset-bootstrap' (Destructive Rebuild), hoặc 'incremental' (Micro-batch MERGE)",
     )
     pipeline_parser.add_argument(
         "--input",

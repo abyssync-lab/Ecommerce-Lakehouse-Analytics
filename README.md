@@ -83,10 +83,10 @@ Pipeline Config ──> Batch Registry ──> Data Contracts ──> Run Metada
         │      - rejection_reasons: array<string>
         │      - batch_id, rejected_at
         ▼
-4. SILVER MERGE / CDC CONTRACT
-   Business Line Key: Order_ID + Order_Line_ID
+4. SILVER INCREMENTAL UPSERT (STABLE BUSINESS GRAIN)
+   Business Line Key: Order_ID + Order_Line_ID (Deterministic Content Fingerprint)
    Delta MERGE INTO (whenMatchedUpdateAll, whenNotMatchedInsertAll)
-   Idempotent batch processing
+   Idempotent batch processing (designed to be extended to full CDC)
                │
                ▼
 5. GOLD CORE MODEL (KIMBALL STAR SCHEMA)
@@ -95,13 +95,14 @@ Pipeline Config ──> Batch Registry ──> Data Contracts ──> Run Metada
    DimProduct, DimDate, DimLocation, DimPayment, DimShipping, DimOrderStatus
                │
                ▼
-6. GOLD ANALYTICAL MARTS
+6. CANONICAL GOLD SEMANTIC BASE & MARTS
+   gold_sales_enriched: Single source of truth connecting Fact & Dimensions
    12 Data Marts + mart_order_summary (Order grain)
    RFM Customer Segmentation (Rule version: rfm-v1)
    Pareto ABC Product Analysis (Rule version: abc-v1)
                │
                ▼
-7. DATA RECONCILIATION GATE
+7. MANDATORY DATA RECONCILIATION GATE
    Revenue Invariant: Sum(Silver) = Sum(Fact) = Overview Mart
    Row Conservation: Raw = Valid + Invalid + Duplicate
    Fact Grain Uniqueness: Count(Fact) = Distinct(SalesKey)
@@ -109,25 +110,25 @@ Pipeline Config ──> Batch Registry ──> Data Contracts ──> Run Metada
    SCD2 Temporal Integrity: Exactly one Is_Current = 1 per customer
                │
                ▼
-8. SERVING LAYER (GOLD-ONLY CONTRACT)
+8. SERVING LAYER (CERTIFIED PUBLICATION ONLY)
    ├── Hive Metastore / Spark Thrift Server ──> Power BI (ODBC/DirectQuery)
-   └── Certified Gold Marts ──────────────────> MongoDB BSON Collections
+   └── Certified Gold Marts ──────────────────> MongoDB (Atomic Staging Swap)
                │
                ▼
 9. OPERATIONS & OBSERVABILITY
-   pipeline_quality Delta table (raw, duplicate, valid, quarantined rows, reject rate %)
-   System Doctor CLI & JSON audit run reports
+   BatchRegistry & pipeline_quality Delta table (raw, duplicate, valid, quarantined rows, reject rate %)
+   PipelineRunResult & JSON audit run reports
 ```
 
 ---
 
-## 3. Hệ Thống 3 Tầng Data Contracts
+## 3. Hệ Thống 3 Tầng Executable Data Contracts
 
-Toàn bộ quy chuẩn về kiểu dữ liệu, tính nullable và biên giá trị được cấu hình độc lập tại tệp [contracts/ecommerce_order.yaml](contracts/ecommerce_order.yaml):
+Toàn bộ quy chuẩn về kiểu dữ liệu, tính nullable, min/max range và Allowed Values được cấu hình độc lập tại tệp [contracts/ecommerce_order.yaml](contracts/ecommerce_order.yaml) và thực thi qua `ContractLoader`:
 
-1. **Source Contract (Landing Layer):** Định nghĩa schema tiếp nhận thô (26 trường thuộc tính) và các ràng buộc nghiệp vụ tối thiểu.
-2. **Silver Contract (Processing Layer):** Dữ liệu sạch, ép kiểu chính xác, chuẩn hóa chuỗi, gán `Order_Line_ID` định danh duy nhất cho từng dòng đơn và phân lập lỗi vào mảng `rejection_reasons`.
-3. **Gold Contract (Certified Serving Layer):** FactSales theo đúng grain 1 dòng sản phẩm trong 1 đơn; `dim_customer` SCD Type 2 bảo đảm khoảng thời gian $[ValidFrom, ValidTo)$ liên tục, không chồng lấn.
+1. **Source Contract (Landing Layer):** Định nghĩa schema tiếp nhận thô (26 trường thuộc tính) bằng StringType rõ ràng (loại bỏ `inferSchema=True` chống schema drift).
+2. **Silver Contract (Processing Layer):** Dữ liệu sạch, ép kiểu chính xác, chuẩn hóa chuỗi, gán `Order_Line_ID` định danh duy nhất ổn định cho từng dòng đơn (ngăn ngừa xung đột micro-batch MERGE) và phân lập lỗi vào mảng `rejection_reasons`.
+3. **Gold Contract (Certified Serving Layer):** FactSales theo đúng grain 1 dòng sản phẩm trong 1 đơn; `dim_customer` SCD Type 2 bảo đảm khoảng thời gian $[ValidFrom, ValidTo)$ liên tục, không chồng lấn; tầng Semantic `gold_sales_enriched` đồng bộ dữ liệu cho mọi Marts.
 
 ---
 
@@ -135,15 +136,17 @@ Toàn bộ quy chuẩn về kiểu dữ liệu, tính nullable và biên giá tr
 
 Hệ thống phân tách rành mạch hai chế độ thực thi qua `PipelineConfig`:
 
-| Tiêu Chí Kỹ Thuật | 1. Bootstrap Mode (Full Refresh) | 2. Incremental Mode (Micro-batch MERGE) |
+| Tiêu Chí Kỹ Thuật | 1. Bootstrap Mode (Destructive Reset) | 2. Incremental Mode (Micro-batch MERGE) |
 |---|---|---|
-| **Mục đích** | Khởi tạo kho dữ liệu từ đầu, nạp lịch sử hoặc chạy lại toàn bộ | Nạp định kỳ các batch giao dịch mới với chi phí tài nguyên tối ưu |
-| **Bronze Layer** | Ghi đè (`mode="overwrite"`) | Ghi tiếp (`mode="append"`) kèm `_batch_id` và `_source_hash` |
+| **Mục đích** | Khởi tạo kho dữ liệu từ đầu, reset môi trường local/demo | Nạp định kỳ các batch giao dịch mới với chi phí tài nguyên tối ưu |
+| **Batch Registry** | Khởi tạo sổ cái, ghi đè trạng thái | Kiểm tra `source_hash`: nếu đã `SUCCESS` thì **SKIP** ngay lập tức |
+| **Bronze Layer** | Ghi đè (`mode="overwrite"`) | Ghi tiếp append-only (`mode="append"`) kèm `_source_hash` |
 | **Silver Layer** | Ép kiểu, làm sạch, ghi đè Silver Delta | Làm sạch batch mới, **Delta MERGE INTO** theo `(Order_ID, Order_Line_ID)` |
+| **Grain Line Key** | Deterministic fingerprint | Bảo toàn stable line identity giữa các micro-batches |
 | **Quarantine** | Ghi đè / nạp mới | Ghi tiếp (`mode="append"`) các bản ghi lỗi của batch mới |
 | **Gold Core** | Rebuild toàn bộ 7 Dimensions & FactSales | Rebuild xác định (*Deterministic Gold Refresh*) bảo toàn SCD2 |
-| **Gold Marts** | Tính toán lại toàn bộ 12 Marts | Làm mới các Marts từ bảng Silver/Fact đã cập nhật |
-| **Lệnh Vận Hành CLI** | `globalcart pipeline bootstrap --scd2` | `globalcart pipeline incremental --input batch.csv --batch-id B01 --scd2` |
+| **Gold Marts** | Tính toán từ `gold_sales_enriched` | Làm mới Marts từ bảng Semantic Base đã cập nhật |
+| **Lệnh Vận Hành CLI** | `globalcart pipeline reset-bootstrap --scd2` | `globalcart pipeline incremental --input batch.csv --batch-id B01 --scd2` |
 
 > [!NOTE]
 > **Định vị chính xác về Gold:** Incremental Pipeline tại đây thực hiện:

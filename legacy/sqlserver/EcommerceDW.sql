@@ -1,4 +1,14 @@
 /* ============================================================
+   [LEGACY / ALTERNATIVE WAREHOUSE IMPLEMENTATION]
+   NOTE: Script này lưu trữ phương án Data Warehouse truyền thống (T-SQL/SQL Server)
+   nhằm mục đích đối sánh kiến trúc (Benchmark / Academic reference).
+   
+   TRONG LAKEHOUSE RUNTIME CHÍNH THỨC:
+   Nguồn chân lý (Single Source of Truth) là Delta Lake Gold Marts, được phục vụ trực tiếp
+   qua Spark Thrift Server (JDBC/ODBC cho Power BI) và Operational Document Store (MongoDB).
+   ============================================================ */
+
+/* ============================================================
    TẠO DATABASE
    ============================================================ */
 

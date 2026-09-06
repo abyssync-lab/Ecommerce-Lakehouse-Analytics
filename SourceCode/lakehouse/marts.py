@@ -86,6 +86,7 @@ def build_fact_sales(
         "Profit",
         "Profit_Margin_Percent",
         "Shipping_Cost",
+        "Shipping_Days",
     ])
 
     fact_sales = fact.select(*fact_cols)
@@ -196,6 +197,49 @@ def build_mart_order_summary(clean_df: Any) -> Any:
         )
         .orderBy(col("Order_Total_Revenue").desc())
     )
+
+
+def build_sales_enriched(fact_sales: Any, dimensions: dict[str, Any]) -> Any:
+    """Xây dựng Gold Semantic Base (`gold_sales_enriched`) kết nối FactSales và Dimensions.
+
+    Tạo một nguồn chân lý kinh doanh duy nhất (Single Source of Truth) cho toàn bộ Gold Marts,
+    đảm bảo tính nhất quán tuyệt đối giữa mô hình Kimball và các Mart phục vụ BI / Reporting.
+    """
+    enriched = fact_sales
+
+    dim_product = dimensions.get("dim_product")
+    if dim_product is not None and "ProductKey" in enriched.columns:
+        enriched = enriched.join(dim_product, on="ProductKey", how="left")
+
+    dim_customer = dimensions.get("dim_customer")
+    if dim_customer is not None and "CustomerKey" in enriched.columns:
+        cust_cols = [c for c in dim_customer.columns if c in ["CustomerKey", "Customer_ID", "Customer_Gender", "Customer_Segment"]]
+        enriched = enriched.join(dim_customer.select(*cust_cols), on="CustomerKey", how="left")
+
+    dim_location = dimensions.get("dim_location")
+    if dim_location is not None and "LocationKey" in enriched.columns:
+        enriched = enriched.join(dim_location, on="LocationKey", how="left")
+
+    dim_payment = dimensions.get("dim_payment")
+    if dim_payment is not None and "PaymentKey" in enriched.columns:
+        enriched = enriched.join(dim_payment, on="PaymentKey", how="left")
+
+    dim_shipping = dimensions.get("dim_shipping")
+    if dim_shipping is not None and "ShippingKey" in enriched.columns:
+        enriched = enriched.join(dim_shipping, on="ShippingKey", how="left")
+
+    dim_status = dimensions.get("dim_order_status")
+    if dim_status is not None and "StatusKey" in enriched.columns:
+        enriched = enriched.join(dim_status, on="StatusKey", how="left")
+
+    dim_date = dimensions.get("dim_date")
+    if dim_date is not None and "DateKey" in enriched.columns:
+        date_cols = [c for c in dim_date.columns if c in ["DateKey", "Date", "Year", "Month", "Order_Date"]]
+        enriched = enriched.join(dim_date.select(*date_cols), on="DateKey", how="left")
+        if "Date" in enriched.columns and "Order_Date" not in enriched.columns:
+            enriched = enriched.withColumnRenamed("Date", "Order_Date")
+
+    return enriched
 
 
 def build_all_marts(clean_df: Any) -> dict[str, Any]:

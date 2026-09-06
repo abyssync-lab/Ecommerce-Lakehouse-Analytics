@@ -89,37 +89,64 @@ def iter_documents(dataframe: Any) -> Generator[dict[str, Any], None, None]:
         yield {key: to_mongo_value(val) for key, val in row.asDict().items()}
 
 
-def replace_collection(
+def publish_collection_atomic(
     database: Any, name: str, dataframe: Any, index_fields: Iterable[str]
 ) -> None:
-    """Xóa collection cũ, ghi dữ liệu mới theo từng Batch và tự động tạo Index.
+    """Nạp dữ liệu vào collection staging, kiểm tra số lượng và tráo đổi nguyên tử (Atomic Switch).
+
+    Tránh tuyệt đối downtime hoặc tình trạng ứng dụng đọc phải dữ liệu load dở dang (partial reads)
+    nếu tiến trình đồng bộ gặp sự cố giữa chừng.
 
     Args:
         database: Đối tượng Database kết nối từ PyMongo.
-        name: Tên Collection trong MongoDB.
+        name: Tên Collection đích trong MongoDB.
         dataframe: Spark DataFrame chứa dữ liệu cần nạp.
         index_fields: Danh sách các trường cần đánh chỉ mục (Index).
     """
-    database.drop_collection(name)
-    collection = database[name]
+    staging_name = f"{name}_staging"
+    database.drop_collection(staging_name)
+    staging_coll = database[staging_name]
     batch: list[dict[str, Any]] = []
     inserted = 0
 
     for document in iter_documents(dataframe):
         batch.append(document)
         if len(batch) >= BATCH_SIZE:
-            collection.insert_many(batch, ordered=False)
+            staging_coll.insert_many(batch, ordered=False)
             inserted += len(batch)
             batch = []
     if batch:
-        collection.insert_many(batch, ordered=False)
+        staging_coll.insert_many(batch, ordered=False)
         inserted += len(batch)
 
     for field in index_fields:
         if field in dataframe.columns:
-            collection.create_index(field)
+            staging_coll.create_index(field)
 
-    LOGGER.info("Collection '%s': Đã nạp thành công %,d documents", name, inserted)
+    # Xác thực số lượng bản ghi nạp vào staging
+    staging_count = staging_coll.count_documents({})
+    expected_count = dataframe.count()
+    if staging_count != expected_count:
+        database.drop_collection(staging_name)
+        raise ValueError(
+            f"Lỗi toàn vẹn dữ liệu khi đồng bộ MongoDB '{name}': "
+            f"Staging ({staging_count}) != Expected ({expected_count})"
+        )
+
+    # Tráo đổi nguyên tử sang collection chính thức (Atomic Collection Swap)
+    try:
+        staging_coll.rename(name, dropTarget=True)
+        LOGGER.info("Collection '%s': Đã nạp và tráo đổi nguyên tử (Atomic Published) %,d documents", name, inserted)
+    except Exception as err:
+        LOGGER.error("Lỗi khi tráo đổi collection nguyên tử cho '%s': %s", name, err)
+        raise
+
+
+def replace_collection(
+    database: Any, name: str, dataframe: Any, index_fields: Iterable[str]
+) -> None:
+    """Hàm ủy quyền tương thích ngược; thực hiện publish_collection_atomic."""
+    publish_collection_atomic(database, name, dataframe, index_fields)
 
 
 def main() -> None:
@@ -138,6 +165,18 @@ def main() -> None:
 
     spark = create_spark_session()
     client = MongoClient(SETTINGS.mongo_uri, **mongo_kwargs)
+
+    try:
+        from lakehouse.registry import BatchRegistry
+
+        registry = BatchRegistry(spark)
+        if not registry.is_latest_run_certified():
+            LOGGER.warning(
+                "CẢNH BÁO KIỂM TOÁN: Lần chạy gần nhất chưa được chứng nhận (SUCCESS) trong Batch Registry! "
+                "Chỉ các phiên chạy vượt qua Reconciliation Gate mới được khuyến nghị xuất bản sang Operational MongoDB."
+            )
+    except Exception as e:
+        LOGGER.debug("Không thể kiểm tra certification trong registry: %s", e)
 
     try:
         client.admin.command("ping")
