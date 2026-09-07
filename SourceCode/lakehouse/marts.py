@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from datetime import datetime
 from functools import lru_cache
 from pathlib import Path
 from typing import Any
@@ -19,7 +20,17 @@ from analytics_rules import (
     RFM_LOYAL,
     RFM_RULE_VERSION,
 )
-from pyspark.sql.functions import avg, col, countDistinct, date_format, datediff, lit, round, when
+from pyspark.sql.functions import (
+    avg,
+    col,
+    countDistinct,
+    date_format,
+    datediff,
+    first,
+    lit,
+    round,
+    when,
+)
 from pyspark.sql.functions import max as spark_max
 from pyspark.sql.functions import sum as spark_sum
 from pyspark.sql.window import Window
@@ -28,6 +39,52 @@ from .dimensions import add_surrogate_key
 
 LOGGER = logging.getLogger(__name__)
 BUSINESS_METRICS_PATH = Path(__file__).resolve().parents[2] / "contracts" / "business_metrics.yaml"
+SHIPPING_SLA_PATH = Path(__file__).resolve().parents[2] / "contracts" / "shipping_sla.yaml"
+
+
+def _ensure_certified_measures(dataframe: Any) -> Any:
+    """Chuẩn hóa measure Gold, tuyệt đối không dùng source revenue/profit làm certified."""
+    result = dataframe
+    if "Net_Line_Amount" not in result.columns:
+        if "Revenue" in result.columns:
+            result = result.withColumn("Net_Line_Amount", col("Revenue"))
+        else:
+            result = result.withColumn(
+                "Net_Line_Amount",
+                col("Quantity") * col("Unit_Price") * (lit(1.0) - col("Discount")),
+            )
+    if "Gross_Profit" not in result.columns:
+        if "Profit" in result.columns:
+            result = result.withColumn("Gross_Profit", col("Profit"))
+        else:
+            result = result.withColumn("Gross_Profit", col("Net_Line_Amount") - col("Cost_Amount"))
+    if "Cost_Amount" not in result.columns:
+        result = result.withColumn("Cost_Amount", col("Quantity") * col("Cost"))
+    if "Gross_Amount" not in result.columns:
+        result = result.withColumn("Gross_Amount", col("Quantity") * col("Unit_Price"))
+    if "Discount_Amount" not in result.columns:
+        result = result.withColumn("Discount_Amount", col("Gross_Amount") * col("Discount"))
+    return result
+
+
+@lru_cache(maxsize=1)
+def _load_shipping_sla() -> tuple[int, dict[str, int]]:
+    """Đọc SLA từ contract, không hard-code rule trong transformation."""
+    data = yaml.safe_load(SHIPPING_SLA_PATH.read_text(encoding="utf-8")) or {}
+    default_days = int(data.get("default_sla_days", 7))
+    method_days = {
+        str(method): int(days) for method, days in (data.get("shipping_methods", {}) or {}).items()
+    }
+    return default_days, method_days
+
+
+def _sla_days_expression(method_column: Any) -> Any:
+    """Sinh Spark expression SLA_Days từ shipping_sla.yaml."""
+    default_days, method_days = _load_shipping_sla()
+    result = lit(default_days)
+    for method, days in method_days.items():
+        result = when(method_column == method, lit(days)).otherwise(result)
+    return result
 
 
 @lru_cache(maxsize=1)
@@ -38,11 +95,22 @@ def _load_business_policy() -> dict[str, list[str]]:
 
     data = yaml.safe_load(BUSINESS_METRICS_PATH.read_text(encoding="utf-8")) or {}
     policy: dict[str, list[str]] = {}
-    for metric_name in ("rfm", "abc"):
+    for metric_name in (
+        "rfm",
+        "abc",
+        "recognized_revenue",
+        "cancelled_value",
+    ):
         statuses = data.get(metric_name, {}).get("included_statuses", ["Delivered"])
         if not statuses:
             raise ValueError(f"Business policy {metric_name} không có included_statuses")
         policy[metric_name] = [str(status) for status in statuses]
+    policy["return_numerator"] = [
+        str(status) for status in data.get("return_rate", {}).get("numerator_status", [])
+    ]
+    policy["return_denominator"] = [
+        str(status) for status in data.get("return_rate", {}).get("denominator_status", [])
+    ]
     return policy
 
 
@@ -59,11 +127,23 @@ def build_fact_sales(
     """Xây dựng FactSales theo đúng Grain: 1 dòng = 1 sản phẩm trong 1 đơn hàng."""
     LOGGER.info("Bắt đầu xây dựng FactSales table...")
 
-    fact = clean_df.withColumn("DateKey", date_format(col("Order_Date"), "yyyyMMdd").cast("int"))
-
-    fact = fact.join(
-        dimensions["dim_product"], on=["Product_Name", "Category", "Sub_Category"], how="left"
+    fact = _ensure_certified_measures(clean_df).withColumn(
+        "DateKey", date_format(col("Order_Date"), "yyyyMMdd").cast("int")
     )
+
+    product_dim = dimensions["dim_product"]
+    if "Product_ID" in fact.columns and "Product_ID" in product_dim.columns:
+        fact = fact.join(
+            product_dim.select("Product_ID", "ProductKey"),
+            on=["Product_ID"],
+            how="left",
+        )
+    else:
+        fact = fact.join(
+            product_dim,
+            on=["Product_Name", "Category", "Sub_Category"],
+            how="left",
+        )
 
     dim_cust = dimensions["dim_customer"]
     if "ValidFrom" in dim_cust.columns and "ValidTo" in dim_cust.columns:
@@ -95,7 +175,8 @@ def build_fact_sales(
     order_cols = ["Order_ID"]
     if "Order_Line_ID" in fact.columns:
         order_cols.append("Order_Line_ID")
-    order_cols.extend(["ProductKey", "CustomerKey", "DateKey"])
+    elif "Product_ID" in fact.columns:
+        order_cols.append("Product_ID")
 
     fact = add_surrogate_key(
         fact,
@@ -106,9 +187,12 @@ def build_fact_sales(
     fact_cols = ["SalesKey", "Order_ID"]
     if "Order_Line_ID" in fact.columns:
         fact_cols.append("Order_Line_ID")
+    if "Product_ID" in fact.columns:
+        fact_cols.append("Product_ID")
     fact_cols.extend(
         [
             "DateKey",
+            "Order_Status",
             "CustomerKey",
             "LocationKey",
             "ProductKey",
@@ -118,12 +202,13 @@ def build_fact_sales(
             "Unit_Price",
             "Quantity",
             "Discount",
-            "Revenue",
-            "Cost",
-            "Profit",
-            "Profit_Margin_Percent",
-            "Shipping_Cost",
-            "Shipping_Days",
+            "Gross_Amount",
+            "Discount_Amount",
+            "Net_Line_Amount",
+            "Cost_Amount",
+            "Gross_Profit",
+            "Source_Revenue",
+            "Source_Profit",
         ]
     )
 
@@ -131,6 +216,86 @@ def build_fact_sales(
 
     LOGGER.info("FactSales đã được khởi tạo thành công (%d dòng).", fact_sales.count())
     return fact_sales
+
+
+def build_fact_order_fulfillment(
+    silver_orders_current: Any,
+    silver_order_lines_current: Any,
+    dimensions: dict[str, Any],
+) -> Any:
+    """Xây fact order grain, không nhân bản Shipping_Cost theo số line."""
+    lines = _ensure_certified_measures(silver_order_lines_current.filter(~col("Is_Deleted")))
+    line_metrics = lines.groupBy("Order_ID").agg(
+        countDistinct("Order_Line_ID").alias("Line_Count"),
+        spark_sum("Quantity").alias("Total_Quantity"),
+        round(spark_sum("Net_Line_Amount"), 2).alias("Order_Value"),
+        round(spark_sum("Gross_Profit"), 2).alias("Order_Profit"),
+    )
+    orders = silver_orders_current.filter(~col("Is_Deleted")).join(
+        line_metrics, on="Order_ID", how="left"
+    )
+    orders = orders.withColumn("DateKey", date_format(col("Order_Date"), "yyyyMMdd").cast("int"))
+    customer_dim = dimensions["dim_customer"]
+    if {"ValidFrom", "ValidTo"}.issubset(
+        set(customer_dim.columns)
+    ) and "Source_Updated_At" in orders.columns:
+        orders = orders.join(
+            customer_dim.select("Customer_ID", "CustomerKey", "ValidFrom", "ValidTo"),
+            (orders["Customer_ID"] == customer_dim["Customer_ID"])
+            & (orders["Source_Updated_At"] >= customer_dim["ValidFrom"])
+            & (orders["Source_Updated_At"] < customer_dim["ValidTo"]),
+            how="left",
+        ).drop(customer_dim["Customer_ID"], "ValidFrom", "ValidTo")
+    else:
+        orders = orders.join(
+            customer_dim.select("Customer_ID", "CustomerKey"),
+            on="Customer_ID",
+            how="left",
+        )
+    orders = orders.join(dimensions["dim_location"], on=["Region", "Country"], how="left")
+    orders = orders.join(dimensions["dim_payment"], on="Payment_Method", how="left")
+    orders = orders.join(
+        dimensions["dim_shipping"],
+        on=["Shipping_Method", "Delivery_Level"],
+        how="left",
+    )
+    orders = orders.join(
+        dimensions["dim_order_status"].select("Order_Status", "StatusKey"),
+        on="Order_Status",
+        how="left",
+    )
+    orders = add_surrogate_key(orders, "OrderKey", ["Order_ID"])
+    return orders.select(
+        "OrderKey",
+        "Order_ID",
+        "Order_Date",
+        "Customer_ID",
+        "Region",
+        "Country",
+        "Order_Status",
+        "Payment_Method",
+        "Shipping_Method",
+        "DateKey",
+        "CustomerKey",
+        "LocationKey",
+        "PaymentKey",
+        "ShippingKey",
+        "StatusKey",
+        "Line_Count",
+        "Total_Quantity",
+        "Order_Value",
+        "Order_Profit",
+        "Shipping_Cost",
+        "Shipping_Days",
+        _sla_days_expression(col("Shipping_Method")).alias("SLA_Days"),
+        when(col("Shipping_Days").isNull(), lit(None).cast("boolean"))
+        .when(col("Shipping_Days") > _sla_days_expression(col("Shipping_Method")), lit(True))
+        .otherwise(lit(False))
+        .alias("Is_SLA_Breached"),
+        when(col("Order_Status") == "Delivered", True).otherwise(False).alias("Is_Delivered"),
+        when(col("Order_Status") == "Returned", True).otherwise(False).alias("Is_Returned"),
+        when(col("Order_Status") == "Cancelled", True).otherwise(False).alias("Is_Cancelled"),
+    )
 
 
 def aggregate_sales(
@@ -141,25 +306,28 @@ def aggregate_sales(
     include_average_order_value: bool = False,
 ) -> Any:
     """Tạo các measure bán hàng dùng chung cho các Gold Data Mart."""
+    dataframe = _ensure_certified_measures(dataframe)
     metrics = [countDistinct("Order_ID").alias("Total_Orders")]
     if include_quantity:
         metrics.append(spark_sum("Quantity").alias("Total_Quantity"))
     metrics.extend(
         [
-            round(spark_sum("Revenue"), 2).alias("Total_Revenue"),
-            round(spark_sum("Profit"), 2).alias("Total_Profit"),
+            round(spark_sum("Net_Line_Amount"), 2).alias("Total_Revenue"),
+            round(spark_sum("Gross_Profit"), 2).alias("Total_Profit"),
         ]
     )
     if include_average_order_value:
         metrics.append(
-            round(spark_sum("Revenue") / countDistinct("Order_ID"), 2).alias("Average_Order_Value")
+            round(spark_sum("Net_Line_Amount") / countDistinct("Order_ID"), 2).alias(
+                "Average_Order_Value"
+            )
         )
     return dataframe.groupBy(*dimensions).agg(*metrics)
 
 
 def build_rfm_mart(clean_df: Any, analysis_date: str | None = None) -> Any:
     """Xây dựng RFM từ các đơn Delivered theo business policy v1."""
-    delivered_df = _filter_policy_rows(clean_df, "rfm")
+    delivered_df = _filter_policy_rows(_ensure_certified_measures(clean_df), "rfm")
     if delivered_df.limit(1).count() == 0:
         return clean_df.sparkSession.createDataFrame(
             [],
@@ -177,7 +345,7 @@ def build_rfm_mart(clean_df: Any, analysis_date: str | None = None) -> Any:
         .agg(
             spark_max("Order_Date").alias("Last_Purchase"),
             countDistinct("Order_ID").alias("Frequency"),
-            round(spark_sum("Revenue"), 2).alias("Monetary"),
+            round(spark_sum("Net_Line_Amount"), 2).alias("Monetary"),
         )
         .withColumn("Recency", datediff(lit(max_date_val), col("Last_Purchase")))
     )
@@ -199,8 +367,8 @@ def build_rfm_mart(clean_df: Any, analysis_date: str | None = None) -> Any:
 
 def build_abc_mart(clean_df: Any) -> Any:
     """Xây dựng Pareto ABC từ Delivered Revenue theo business policy v1."""
-    delivered_df = _filter_policy_rows(clean_df, "abc")
-    total_rev = delivered_df.select(spark_sum("Revenue")).collect()[0][0]
+    delivered_df = _filter_policy_rows(_ensure_certified_measures(clean_df), "abc")
+    total_rev = delivered_df.select(spark_sum("Net_Line_Amount")).collect()[0][0]
     if not total_rev or total_rev <= 0:
         return clean_df.sparkSession.createDataFrame(
             [],
@@ -212,8 +380,8 @@ def build_abc_mart(clean_df: Any) -> Any:
 
     prod_base = delivered_df.groupBy("Product_Name", "Category").agg(
         spark_sum("Quantity").alias("Total_Quantity"),
-        round(spark_sum("Revenue"), 2).alias("Total_Revenue"),
-        round(spark_sum("Profit"), 2).alias("Total_Profit"),
+        round(spark_sum("Net_Line_Amount"), 2).alias("Total_Revenue"),
+        round(spark_sum("Gross_Profit"), 2).alias("Total_Profit"),
     )
 
     # Thêm Product_Name để thứ tự phân loại ổn định khi hai sản phẩm cùng doanh thu.
@@ -244,17 +412,132 @@ def build_abc_mart(clean_df: Any) -> Any:
 
 def build_mart_order_summary(clean_df: Any) -> Any:
     """Xây dựng Data Mart tổng hợp ở mức Đơn Hàng (Order Grain), phân tách rành mạch với FactSales (Line-Item Grain)."""
+    clean_df = _ensure_certified_measures(clean_df)
     return (
         clean_df.groupBy("Order_ID", "Order_Date", "Customer_ID", "Order_Status")
         .agg(
             spark_sum("Quantity").alias("Total_Items"),
-            round(spark_sum("Revenue"), 2).alias("Order_Total_Revenue"),
-            round(spark_sum("Cost"), 2).alias("Order_Total_Cost"),
-            round(spark_sum("Profit"), 2).alias("Order_Total_Profit"),
-            round(spark_sum("Shipping_Cost"), 2).alias("Order_Shipping_Cost"),
+            round(spark_sum("Net_Line_Amount"), 2).alias("Order_Total_Revenue"),
+            round(spark_sum("Cost_Amount"), 2).alias("Order_Total_Cost"),
+            round(spark_sum("Gross_Profit"), 2).alias("Order_Total_Profit"),
+            first("Shipping_Cost", ignorenulls=True).alias("Order_Shipping_Cost"),
         )
         .orderBy(col("Order_Total_Revenue").desc())
     )
+
+
+def build_certified_marts(
+    sales_enriched: Any,
+    fact_order_fulfillment: Any,
+    publication_as_of_date: str | None = None,
+) -> dict[str, Any]:
+    """Tạo sáu mart nghiệp vụ dùng cùng certified line/order facts."""
+    sales = _ensure_certified_measures(sales_enriched)
+    orders = fact_order_fulfillment
+    policy = _load_business_policy()
+    delivered = col("Order_Status").isin(policy["recognized_revenue"])
+    returned = col("Order_Status").isin(policy["return_numerator"])
+    cancelled = col("Order_Status").isin(policy["cancelled_value"])
+
+    executive = orders.groupBy("Order_Date").agg(
+        countDistinct("Order_ID").alias("Total_Orders"),
+        countDistinct(when(delivered, col("Order_ID"))).alias("Delivered_Orders"),
+        countDistinct(when(returned, col("Order_ID"))).alias("Returned_Orders"),
+        countDistinct(
+            when(col("Order_Status").isin(policy["return_denominator"]), col("Order_ID"))
+        ).alias("Return_Denominator_Orders"),
+        countDistinct(when(cancelled, col("Order_ID"))).alias("Cancelled_Orders"),
+        round(spark_sum(when(delivered, col("Order_Value")).otherwise(0.0)), 2).alias(
+            "Delivered_Revenue"
+        ),
+        round(spark_sum(when(returned, col("Order_Value")).otherwise(0.0)), 2).alias(
+            "Returned_Value"
+        ),
+        round(spark_sum(when(delivered, col("Order_Profit")).otherwise(0.0)), 2).alias(
+            "Delivered_Profit"
+        ),
+    )
+    executive = (
+        executive.withColumn(
+            "AOV",
+            when(col("Delivered_Orders") > 0, col("Delivered_Revenue") / col("Delivered_Orders")),
+        )
+        .withColumn(
+            "Return_Rate",
+            when(
+                col("Return_Denominator_Orders") > 0,
+                col("Returned_Orders") / col("Return_Denominator_Orders"),
+            ),
+        )
+        .withColumn(
+            "Cancellation_Rate",
+            when(col("Total_Orders") > 0, col("Cancelled_Orders") / col("Total_Orders")),
+        )
+    )
+
+    product = (
+        sales.groupBy("Product_ID", "Product_Name", "Category")
+        .agg(
+            countDistinct("Order_ID").alias("Orders"),
+            spark_sum("Quantity").alias("Quantity"),
+            round(spark_sum(when(delivered, col("Net_Line_Amount")).otherwise(0.0)), 2).alias(
+                "Delivered_Revenue"
+            ),
+            round(spark_sum(when(delivered, col("Gross_Profit")).otherwise(0.0)), 2).alias(
+                "Delivered_Profit"
+            ),
+            countDistinct(when(delivered, col("Order_ID"))).alias("Delivered_Orders"),
+            countDistinct(when(returned, col("Order_ID"))).alias("Returned_Orders"),
+        )
+        .withColumn(
+            "Return_Rate",
+            when(
+                (col("Delivered_Orders") + col("Returned_Orders")) > 0,
+                col("Returned_Orders") / (col("Delivered_Orders") + col("Returned_Orders")),
+            ),
+        )
+        .withColumn(
+            "Profit_Margin",
+            when(col("Delivered_Revenue") != 0, col("Delivered_Profit") / col("Delivered_Revenue")),
+        )
+    )
+
+    geography = sales.groupBy("Region", "Country").agg(
+        countDistinct("Order_ID").alias("Orders"),
+        round(spark_sum(when(delivered, col("Net_Line_Amount")).otherwise(0.0)), 2).alias(
+            "Delivered_Revenue"
+        ),
+        round(spark_sum(when(delivered, col("Gross_Profit")).otherwise(0.0)), 2).alias(
+            "Delivered_Profit"
+        ),
+    )
+
+    fulfillment = (
+        orders.groupBy("Shipping_Method")
+        .agg(
+            countDistinct("Order_ID").alias("Total_Shipments"),
+            round(avg("Shipping_Days"), 2).alias("Average_Shipping_Days"),
+            round(avg("Shipping_Cost"), 2).alias("Average_Shipping_Cost"),
+            countDistinct(when(col("Is_SLA_Breached"), col("Order_ID"))).alias("SLA_Breach_Count"),
+        )
+        .withColumn(
+            "SLA_Breach_Rate",
+            when(
+                col("Total_Shipments") > 0,
+                col("SLA_Breach_Count") / col("Total_Shipments"),
+            ),
+        )
+    )
+
+    analysis_date = publication_as_of_date or datetime.today().date().isoformat()
+    return {
+        "mart_executive_daily": executive,
+        "mart_product_performance": product,
+        "mart_geography_performance": geography,
+        "mart_fulfillment_sla": fulfillment,
+        "mart_customer_rfm": build_rfm_mart(sales, analysis_date=analysis_date),
+        "mart_product_abc": build_abc_mart(sales),
+    }
 
 
 def build_sales_enriched(fact_sales: Any, dimensions: dict[str, Any]) -> Any:
@@ -267,7 +550,16 @@ def build_sales_enriched(fact_sales: Any, dimensions: dict[str, Any]) -> Any:
 
     dim_product = dimensions.get("dim_product")
     if dim_product is not None and "ProductKey" in enriched.columns:
-        enriched = enriched.join(dim_product, on="ProductKey", how="left")
+        product_columns = [
+            column
+            for column in ["Product_ID", "Product_Name", "Category", "Sub_Category"]
+            if column in dim_product.columns and column not in enriched.columns
+        ]
+        enriched = enriched.join(
+            dim_product.select("ProductKey", *product_columns),
+            on="ProductKey",
+            how="left",
+        )
 
     dim_customer = dimensions.get("dim_customer")
     if dim_customer is not None and "CustomerKey" in enriched.columns:
@@ -292,7 +584,12 @@ def build_sales_enriched(fact_sales: Any, dimensions: dict[str, Any]) -> Any:
 
     dim_status = dimensions.get("dim_order_status")
     if dim_status is not None and "StatusKey" in enriched.columns:
-        enriched = enriched.join(dim_status, on="StatusKey", how="left")
+        status_columns = [
+            column
+            for column in dim_status.columns
+            if column == "StatusKey" or column not in enriched.columns
+        ]
+        enriched = enriched.join(dim_status.select(*status_columns), on="StatusKey", how="left")
 
     dim_date = dimensions.get("dim_date")
     if dim_date is not None and "DateKey" in enriched.columns:
@@ -323,13 +620,16 @@ def build_all_marts(clean_df: Any) -> dict[str, Any]:
     """Tạo toàn bộ Gold Data Marts tổng hợp cho tầng Gold."""
     LOGGER.info("Bắt đầu xây dựng Gold Data Marts...")
 
+    clean_df = _ensure_certified_measures(clean_df)
     overview = clean_df.agg(
         countDistinct("Order_ID").alias("Total_Orders"),
         spark_sum("Quantity").alias("Total_Quantity"),
-        round(spark_sum("Revenue"), 2).alias("Total_Revenue"),
-        round(spark_sum("Cost"), 2).alias("Total_Cost"),
-        round(spark_sum("Profit"), 2).alias("Total_Profit"),
-        round((spark_sum("Profit") / spark_sum("Revenue")) * 100, 2).alias("Average_Profit_Margin"),
+        round(spark_sum("Net_Line_Amount"), 2).alias("Total_Revenue"),
+        round(spark_sum("Cost_Amount"), 2).alias("Total_Cost"),
+        round(spark_sum("Gross_Profit"), 2).alias("Total_Profit"),
+        round((spark_sum("Gross_Profit") / spark_sum("Net_Line_Amount")) * 100, 2).alias(
+            "Average_Profit_Margin"
+        ),
         round(avg("Shipping_Days"), 2).alias("Average_Shipping_Days"),
         round(avg("Shipping_Cost"), 2).alias("Average_Shipping_Cost"),
     )
@@ -350,8 +650,8 @@ def build_all_marts(clean_df: Any) -> dict[str, Any]:
             clean_df.groupBy("Product_Name", "Category", "Sub_Category")
             .agg(
                 spark_sum("Quantity").alias("Total_Quantity"),
-                round(spark_sum("Revenue"), 2).alias("Total_Revenue"),
-                round(spark_sum("Profit"), 2).alias("Total_Profit"),
+                round(spark_sum("Net_Line_Amount"), 2).alias("Total_Revenue"),
+                round(spark_sum("Gross_Profit"), 2).alias("Total_Profit"),
             )
             .orderBy(col("Total_Revenue").desc())
             .limit(10)
@@ -365,7 +665,7 @@ def build_all_marts(clean_df: Any) -> dict[str, Any]:
                 countDistinct("Order_ID").alias("Total_Orders"),
                 round(avg("Shipping_Days"), 2).alias("Avg_Shipping_Days"),
                 round(avg("Shipping_Cost"), 2).alias("Avg_Shipping_Cost"),
-                round(spark_sum("Revenue"), 2).alias("Total_Revenue"),
+                round(spark_sum("Net_Line_Amount"), 2).alias("Total_Revenue"),
             )
             .orderBy(col("Total_Orders").desc())
         ),

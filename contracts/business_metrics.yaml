@@ -13,6 +13,10 @@ return_rate:
     - "Delivered"
     - "Returned"
 
+cancelled_value:
+  included_statuses:
+    - "Cancelled"
+
 rfm:
   included_statuses:
     - "Delivered"

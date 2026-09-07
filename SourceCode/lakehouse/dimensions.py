@@ -7,6 +7,7 @@ from typing import Any
 
 from pyspark.sql.functions import (
     col,
+    concat_ws,
     date_format,
     explode,
     expr,
@@ -17,8 +18,10 @@ from pyspark.sql.functions import (
     quarter,
     row_number,
     sequence,
+    sha2,
     to_date,
     to_timestamp,
+    trim,
     when,
     xxhash64,
     year,
@@ -44,10 +47,15 @@ def add_surrogate_key(dataframe: Any, key_name: str, order_cols: list[str]) -> A
 
 
 def build_dim_product(clean_df: Any) -> Any:
-    """Xây dựng Dimension Product."""
-    dim = clean_df.select("Product_Name", "Category", "Sub_Category").dropDuplicates()
-    dim = add_surrogate_key(dim, "ProductKey", ["Product_Name", "Category", "Sub_Category"])
-    return dim.select("ProductKey", "Category", "Sub_Category", "Product_Name")
+    """Xây dựng Product dimension với Product_ID là natural key ổn định."""
+    source = clean_df
+    if "Product_ID" not in source.columns:
+        source = source.withColumn("Product_ID", sha2(trim(col("Product_Name")), 256))
+    dim = source.select("Product_ID", "Product_Name", "Category", "Sub_Category").dropDuplicates(
+        ["Product_ID"]
+    )
+    dim = add_surrogate_key(dim, "ProductKey", ["Product_ID"])
+    return dim.select("ProductKey", "Product_ID", "Product_Name", "Category", "Sub_Category")
 
 
 def build_dim_customer(clean_df: Any, use_scd2: bool = False) -> Any:
@@ -62,11 +70,20 @@ def build_dim_customer(clean_df: Any, use_scd2: bool = False) -> Any:
         if "Order_ID" in clean_df.columns:
             order_expressions.append(col("Order_ID").desc())
         w = Window.partitionBy("Customer_ID").orderBy(*order_expressions)
+        source_columns = [
+            "Customer_ID",
+            "Customer_Gender",
+            "Customer_Segment",
+            "Order_Date",
+        ]
+        for technical_column in ("Source_Updated_At", "Order_ID"):
+            if technical_column in clean_df.columns:
+                source_columns.append(technical_column)
         dim = (
-            clean_df.select("Customer_ID", "Customer_Gender", "Customer_Segment", "Order_Date")
+            clean_df.select(*source_columns)
             .withColumn("rn", row_number().over(w))
             .filter(col("rn") == 1)
-            .drop("rn", "Order_Date")
+            .drop("rn", "Order_Date", "Source_Updated_At", "Order_ID")
         )
     else:
         dim = clean_df.select("Customer_ID", "Customer_Gender", "Customer_Segment").dropDuplicates(
@@ -106,11 +123,26 @@ def build_dim_customer_scd2(clean_df: Any) -> Any:
     ]
     if "Order_ID" in clean_df.columns:
         event_columns.append(col("Order_ID").alias("_order_id"))
+    if "_record_hash" in clean_df.columns:
+        event_columns.append(col("_record_hash").alias("_record_hash"))
 
     cust_events = clean_df.select(*event_columns).dropDuplicates()
+    cust_events = cust_events.withColumn(
+        "Attribute_Hash",
+        sha2(
+            concat_ws(
+                "\u001f",
+                col("Customer_Gender").cast("string"),
+                col("Customer_Segment").cast("string"),
+            ),
+            256,
+        ),
+    )
     order_cols = ["_event_at"]
     if "_order_id" in cust_events.columns:
         order_cols.append("_order_id")
+    if "_record_hash" in cust_events.columns:
+        order_cols.append("_record_hash")
     w_order = Window.partitionBy("Customer_ID").orderBy(*order_cols)
 
     # Null-safe comparison rất quan trọng: hai version có cùng attribute NULL không
@@ -135,7 +167,11 @@ def build_dim_customer_scd2(clean_df: Any) -> Any:
     )
 
     state_versions = events_grouped.groupBy(
-        "Customer_ID", "change_group", "Customer_Gender", "Customer_Segment"
+        "Customer_ID",
+        "change_group",
+        "Customer_Gender",
+        "Customer_Segment",
+        "Attribute_Hash",
     ).agg(spark_min("_event_at").alias("ValidFrom"))
 
     # ValidTo là khoảng nửa mở [ValidFrom, ValidTo), dùng event kế tiếp làm mốc đóng.
@@ -156,8 +192,11 @@ def build_dim_customer_scd2(clean_df: Any) -> Any:
         "Customer_ID",
         "Customer_Gender",
         "Customer_Segment",
+        "Attribute_Hash",
         "ValidFrom",
         "ValidTo",
+        col("ValidFrom").alias("Valid_From"),
+        col("ValidTo").alias("Valid_To"),
         "Is_Current",
     )
 
@@ -218,12 +257,18 @@ def build_dim_date(spark: Any, clean_df: Any) -> Any:
     return dim.select("DateKey", "FullDate", "Year", "Month", "Quarter")
 
 
-def build_all_dimensions(spark: Any, clean_df: Any, use_scd2: bool = False) -> dict[str, Any]:
-    """Tạo toàn bộ 7 bảng Dimension cho Star Schema."""
+def build_all_dimensions(
+    spark: Any,
+    clean_df: Any,
+    use_scd2: bool = False,
+    customer_history_df: Any | None = None,
+) -> dict[str, Any]:
+    """Tạo các dimension; SCD2 có thể nhận toàn bộ customer event history từ Bronze."""
     LOGGER.info("Bắt đầu xây dựng 7 bảng Dimension Kimball Star Schema...")
+    customer_source = customer_history_df if customer_history_df is not None else clean_df
     dims = {
         "dim_product": build_dim_product(clean_df),
-        "dim_customer": build_dim_customer(clean_df, use_scd2=use_scd2),
+        "dim_customer": build_dim_customer(customer_source, use_scd2=use_scd2),
         "dim_location": build_dim_location(clean_df),
         "dim_payment": build_dim_payment(clean_df),
         "dim_shipping": build_dim_shipping(clean_df),

@@ -204,8 +204,8 @@ def test_gold_sales_enriched_and_marts_consistency(spark_session):
     assert "mart_order_summary" in marts
     assert "mart_rfm_customer_segmentation" in marts
 
-    fact_rev = round(float(fact.select(spark_sum("Revenue")).collect()[0][0]), 2)
-    enriched_rev = round(float(enriched.select(spark_sum("Revenue")).collect()[0][0]), 2)
+    fact_rev = round(float(fact.select(spark_sum("Net_Line_Amount")).collect()[0][0]), 2)
+    enriched_rev = round(float(enriched.select(spark_sum("Net_Line_Amount")).collect()[0][0]), 2)
 
     assert fact_rev == enriched_rev == 1290.0
 

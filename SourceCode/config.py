@@ -94,7 +94,10 @@ class Settings:
     # Đường dẫn các tầng Medallion Lakehouse (Bronze, Silver, Gold, Quarantine, Monitoring)
     bronze_delta: str = "/ecommerce/bronze/ecommerce_raw_delta"
     ingestion_batches_delta: str = "/ecommerce/bronze/ingestion_batches_delta"
+    ingestion_files_delta: str = "/ecommerce/control/ctl_ingestion_files_delta"
     silver_delta: str = "/ecommerce/silver/ecommerce_clean_delta"
+    silver_orders_delta: str = "/ecommerce/silver/silver_orders_current_delta"
+    silver_order_lines_delta: str = "/ecommerce/silver/silver_order_lines_current_delta"
     quarantine_delta: str = "/ecommerce/quarantine/rejected_rows"
     gold_star_schema_base: str = "/ecommerce/gold/star_schema"
     gold_marts_base: str = "/ecommerce/gold/marts"
@@ -147,6 +150,7 @@ class PipelineConfig:
     input_path: str | None = None
     run_delta_demo: bool = False
     quarantine_path: str | None = None
+    max_reject_rate: float | None = None
 
 
 SETTINGS = Settings()

@@ -211,12 +211,17 @@ PROCESSING
     -> SILVER_MERGED
     -> GOLD_BUILT
     -> RECONCILED
+    -> READY_TO_PUBLISH
     -> PUBLISHED
 ~~~
 
 Lỗi tại bất kỳ bước nào đều chuyển run sang FAILED, lưu error_code và
 error_message, rồi re-raise lỗi để scheduler biết task thất bại. Không được
 nuốt lỗi ở registry write, quarantine write, quality metrics write hoặc publish.
+
+Nếu publication pointer đã đổi nhưng bước chốt registry thất bại, run được giữ ở
+`CONTROL_FINALIZATION_PENDING`; không ghi đè thành `FAILED` vì Power BI có thể đã
+đọc snapshot mới.
 
 Trong code, orchestration phải có dạng tương đương:
 
@@ -225,6 +230,8 @@ run = registry.start_run(...)
 
 try:
     result = execute_pipeline(...)
+    registry.mark_ready_to_publish(run.run_id)
+    publish_gold_run(...)
     registry.mark_published(run.run_id, ...)
     return result
 except Exception as exc:
@@ -407,8 +414,9 @@ Mô hình Gold hướng đến constellation gồm hai fact:
 - dim_date
 - dim_product
 - dim_customer — SCD Type 2 cho các thuộc tính cần lịch sử
-- dim_geography
-- dim_order_context — gộp status, payment method và shipping method
+- dim_location, dim_payment, dim_shipping, dim_order_status — các dimension
+  compatibility hiện đang được dùng bởi fact builder; có thể gộp thành
+  `dim_geography` và `dim_order_context` ở một PR schema migration riêng.
 
 ### fact_sales_line
 
@@ -481,8 +489,8 @@ Các policy cần thống nhất:
 
 Không tính average của từng phần trăm line rồi mới average tiếp ở cấp report.
 
-Code hiện tại vẫn giữ các mart cũ để tương thích trong giai đoạn refactor. Định
-hướng semantic model cuối cùng là sáu mart có ý nghĩa nghiệp vụ:
+Pipeline hiện dùng sáu mart certified này; `build_all_marts` vẫn tồn tại như API
+tương thích cho các consumer cũ:
 
 1. mart_executive_daily
 2. mart_product_performance
@@ -544,11 +552,12 @@ GlobalEcommerceBigData/
 │   ├── lakehouse/
 │   │   ├── pipeline.py           # orchestration
 │   │   ├── ingestion.py          # file read, hash, Bronze metadata
+│   │   ├── file_manifest.py      # ctl_ingestion_files và Bronze commit ledger
 │   │   ├── registry.py            # run lifecycle và metrics
 │   │   ├── publication.py         # staging, serving, pointer
 │   │   ├── silver.py              # quality, dedup, current state
 │   │   ├── dimensions.py          # dimensions và SCD2
-│   │   ├── marts.py               # semantic marts hiện tại
+│   │   ├── marts.py               # facts, certified marts và API legacy
 │   │   ├── reconciliation.py      # data quality checks
 │   │   └── contracts/             # contract loader/evaluator
 │   ├── SparkEcommerceAnalysis.py  # CLI entry point hiện tại
@@ -560,10 +569,7 @@ GlobalEcommerceBigData/
 │   ├── business_metrics.yaml
 │   └── shipping_sla.yaml
 ├── Data/
-├── tests/
-│   ├── unit/
-│   ├── integration/
-│   └── e2e/
+├── tests/                        # Spark, contract, reconciliation và CLI tests
 ├── .github/workflows/quality.yml
 ├── requirements.txt
 └── README.md
@@ -640,9 +646,7 @@ Report không được dùng CSV raw để giả lập kết quả lakehouse tro
 ### Local
 
 ~~~~powershell
-python -m pytest tests/unit -v
-python -m pytest tests/integration -v --basetemp=./scratch/pytest_temp
-python -m pytest tests/e2e -v --basetemp=./scratch/pytest_temp
+python -m pytest -v --basetemp=./scratch/pytest_temp
 ~~~~
 
 ### CI
@@ -698,16 +702,12 @@ con số được mặc định coi là đã đạt:
 
 Các thay đổi nên tách thành PR nhỏ, mỗi PR có test và invariant riêng:
 
-1. Làm CI chạy được Spark/Delta thật.
-2. Hoàn thiện data contract v2 và contract-driven quarantine.
-3. Tách rõ order header và order line trong Silver.
-4. Bổ sung reject-threshold enforcement và quality metrics đầy đủ.
-5. Hoàn thiện persistent dimension key và incremental SCD2.
-6. Tách fact building khỏi mart building.
-7. Chuyển semantic model sang sáu mart nghiệp vụ.
-8. Bổ sung test publication failure và serving pointer.
-9. Chỉ sau đó mới thêm Airflow DAG gọi cùng CLI entry point.
-10. Cập nhật Power BI và portfolio report chỉ đọc certified Gold.
+1. Bổ sung test Spark cho file-ledger retry sau Bronze commit.
+2. Hoàn thiện reconciliation riêng cho order header, order line và fact order.
+3. Bổ sung unknown member key `0` và kiểm tra foreign key bắt buộc.
+4. Bổ sung test late-arriving SCD2 và publication finalization pending.
+5. Chỉ sau đó mới thêm Airflow DAG gọi cùng CLI entry point.
+6. Cập nhật Power BI và portfolio report chỉ đọc certified Gold serving.
 
 ## 19. Thông điệp chính của dự án
 

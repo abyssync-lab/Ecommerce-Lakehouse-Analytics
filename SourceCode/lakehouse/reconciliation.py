@@ -26,10 +26,29 @@ LOGGER = logging.getLogger(__name__)
 def reconcile_revenue_invariant(
     clean_df: Any, fact_sales: Any, mart_overview: Any
 ) -> dict[str, Any]:
-    """Kiểm tra bất biến doanh thu: SUM(Silver.Revenue) == SUM(FactSales.Revenue) == Mart Overview Total_Revenue."""
-    silver_rev = round(float(clean_df.select(spark_sum("Revenue")).collect()[0][0] or 0.0), 2)
-    fact_rev = round(float(fact_sales.select(spark_sum("Revenue")).collect()[0][0] or 0.0), 2)
-    overview_rev = round(float(mart_overview.select("Total_Revenue").collect()[0][0] or 0.0), 2)
+    """Kiểm tra Silver certified amount == Fact == Executive overview."""
+    certified_policy = "Delivered" if "Delivered_Revenue" in mart_overview.columns else None
+    silver_input = (
+        clean_df.filter(col("Order_Status") == certified_policy)
+        if certified_policy and "Order_Status" in clean_df.columns
+        else clean_df
+    )
+    fact_input = (
+        fact_sales.filter(col("Order_Status") == certified_policy)
+        if certified_policy and "Order_Status" in fact_sales.columns
+        else fact_sales
+    )
+    silver_column = "Net_Line_Amount" if "Net_Line_Amount" in silver_input.columns else "Revenue"
+    fact_column = "Net_Line_Amount" if "Net_Line_Amount" in fact_input.columns else "Revenue"
+    silver_rev = round(
+        float(silver_input.select(spark_sum(silver_column)).collect()[0][0] or 0.0), 2
+    )
+    fact_rev = round(float(fact_input.select(spark_sum(fact_column)).collect()[0][0] or 0.0), 2)
+    if "Total_Revenue" in mart_overview.columns:
+        overview_value = mart_overview.select("Total_Revenue").collect()[0][0]
+    else:
+        overview_value = mart_overview.select(spark_sum("Delivered_Revenue")).collect()[0][0]
+    overview_rev = round(float(overview_value or 0.0), 2)
 
     diff_silver_fact = abs(silver_rev - fact_rev)
     diff_fact_overview = abs(fact_rev - overview_rev)
@@ -102,6 +121,36 @@ def reconcile_fk_completeness(fact_sales: Any) -> dict[str, Any]:
     }
 
 
+def reconcile_current_state_grain(
+    silver_orders_current: Any | None,
+    silver_order_lines_current: Any | None,
+) -> dict[str, Any]:
+    """Kiểm tra grain riêng của order header và order line current-state."""
+    if silver_orders_current is None or silver_order_lines_current is None:
+        return {
+            "check": "silver_current_state_grain",
+            "passed": True,
+            "note": "Không truyền hai bảng Silver tách grain; bỏ qua ở API tương thích.",
+        }
+    active_orders = silver_orders_current.filter(~col("Is_Deleted"))
+    active_lines = silver_order_lines_current.filter(~col("Is_Deleted"))
+    duplicate_orders = active_orders.count() - active_orders.select("Order_ID").distinct().count()
+    duplicate_lines = (
+        active_lines.count() - active_lines.select("Order_ID", "Order_Line_ID").distinct().count()
+    )
+    orphan_lines = active_lines.join(
+        active_orders.select("Order_ID").distinct(), on="Order_ID", how="left_anti"
+    ).count()
+    passed = duplicate_orders == 0 and duplicate_lines == 0 and orphan_lines == 0
+    return {
+        "check": "silver_current_state_grain",
+        "passed": passed,
+        "duplicate_order_rows": duplicate_orders,
+        "duplicate_order_line_rows": duplicate_lines,
+        "orphan_active_lines": orphan_lines,
+    }
+
+
 def reconcile_scd2_temporal_integrity(dim_customer: Any) -> dict[str, Any]:
     """Kiểm tra tính toàn vẹn thời gian của SCD Type 2 Customer:
 
@@ -166,6 +215,9 @@ def run_full_reconciliation(
     run_id: str | None = None,
     export_path: str | Path | None = None,
     valid_count: int | None = None,
+    silver_orders_current: Any | None = None,
+    silver_order_lines_current: Any | None = None,
+    fact_order_fulfillment: Any | None = None,
 ) -> dict[str, Any]:
     """Thực thi toàn bộ bộ kiểm thử Data Reconciliation Gate và xuất báo cáo JSON.
 
@@ -198,6 +250,23 @@ def run_full_reconciliation(
     grain_check = reconcile_fact_grain_uniqueness(fact_sales)
     fk_check = reconcile_fk_completeness(fact_sales)
     scd2_check = reconcile_scd2_temporal_integrity(dim_customer)
+    silver_grain_check = reconcile_current_state_grain(
+        silver_orders_current, silver_order_lines_current
+    )
+    order_fact_check = {
+        "check": "order_fact_grain",
+        "passed": True,
+        "note": "Không truyền fact_order_fulfillment; bỏ qua ở API tương thích.",
+    }
+    if fact_order_fulfillment is not None:
+        total_orders = fact_order_fulfillment.count()
+        distinct_orders = fact_order_fulfillment.select("OrderKey").distinct().count()
+        order_fact_check = {
+            "check": "order_fact_grain",
+            "passed": total_orders == distinct_orders,
+            "total_order_fact_rows": total_orders,
+            "distinct_order_keys": distinct_orders,
+        }
 
     all_passed = all(
         [
@@ -206,6 +275,8 @@ def run_full_reconciliation(
             grain_check["passed"],
             fk_check["passed"],
             scd2_check["passed"],
+            silver_grain_check["passed"],
+            order_fact_check["passed"],
         ]
     )
 
@@ -218,6 +289,8 @@ def run_full_reconciliation(
             "fact_grain_uniqueness": grain_check,
             "foreign_key_completeness": fk_check,
             "scd2_temporal_integrity": scd2_check,
+            "silver_current_state_grain": silver_grain_check,
+            "order_fact_grain": order_fact_check,
         },
     }
 

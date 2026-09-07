@@ -278,6 +278,19 @@ class BatchRegistry:
     def mark_reconciled(self, run_id: str) -> None:
         self.update_status(run_id, "RECONCILED")
 
+    def mark_ready_to_publish(self, run_id: str) -> None:
+        """Đánh dấu Gold đã pass gate và chuẩn bị đổi publication pointer."""
+        self.update_status(run_id, "READY_TO_PUBLISH")
+
+    def mark_control_finalization_pending(self, run_id: str, error: Exception | str) -> None:
+        """Pointer đã đổi nhưng registry chưa chốt được; không báo FAILED giả."""
+        self.update_status(
+            run_id,
+            "CONTROL_FINALIZATION_PENDING",
+            error_code="CONTROL_FINALIZATION_PENDING",
+            error_message=str(error)[:4000],
+        )
+
     def mark_published(
         self,
         run_id: str,

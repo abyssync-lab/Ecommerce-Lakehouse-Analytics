@@ -16,6 +16,7 @@ from pyspark.sql.functions import (
     lit,
     month,
     round,
+    row_number,
     sha2,
     size,
     substring,
@@ -25,7 +26,6 @@ from pyspark.sql.functions import (
     when,
     year,
 )
-from pyspark.sql.functions import sum as spark_sum
 from pyspark.sql.window import Window
 
 from .contracts.loader import get_spark_silver_rules, load_contract
@@ -103,8 +103,14 @@ def validate_silver_data(
     rules.setdefault("Quantity > 0", col("Quantity") > 0)
     rules.setdefault("Unit_Price >= 0", col("Unit_Price") >= 0)
     rules.setdefault("Discount trong [0, 1]", col("Discount").between(0, 1))
-    rules.setdefault("Revenue >= 0", col("Revenue") >= 0)
-    rules.setdefault("Shipping_Days >= 0", col("Shipping_Days") >= 0)
+    if "Source_Revenue" in clean_df.columns:
+        rules.setdefault("Source_Revenue >= 0", col("Source_Revenue") >= 0)
+    # Shipping_Days là thuộc tính cấp đơn và có thể chưa xuất hiện ở event
+    # tạo mới; NULL không phải là 0 và không được biến thành dữ liệu giả.
+    rules.setdefault(
+        "Shipping_Days >= 0",
+        col("Shipping_Days").isNull() | (col("Shipping_Days") >= 0),
+    )
 
     failed = []
     # DELETE chỉ mang khóa + sequence metadata; không áp dụng các rule tài chính
@@ -169,6 +175,10 @@ def clean_and_enrich_silver(
     # Incremental mode không được tự sinh line id; caller truyền False để bắt lỗi nguồn.
     if "Product_Name" not in typed_df.columns and "Product_ID" in typed_df.columns:
         typed_df = typed_df.withColumn("Product_Name", col("Product_ID"))
+    if "Product_ID" not in typed_df.columns and "Product_Name" in typed_df.columns:
+        # Historical bootstrap chỉ được phép sinh natural key Product_ID từ
+        # Product_Name; incremental v2 bắt buộc upstream gửi Product_ID thật.
+        typed_df = typed_df.withColumn("Product_ID", sha2(trim(col("Product_Name")), 256))
 
     # Event v2 cho incremental bắt buộc có Product_ID ở mức dòng UPSERT.
     # Đưa cột còn thiếu về NULL để rule quality tạo MISSING_PRODUCT_ID thay vì
@@ -192,6 +202,11 @@ def clean_and_enrich_silver(
     ]:
         if optional_text not in typed_df.columns:
             typed_df = typed_df.withColumn(optional_text, lit("Unknown"))
+    for required_text in ["Customer_ID", "Order_Status"]:
+        if required_text not in typed_df.columns:
+            # Không gán Unknown cho khóa/semantic status bắt buộc của UPSERT;
+            # để rule quarantine báo đúng lỗi nguồn.
+            typed_df = typed_df.withColumn(required_text, lit(None).cast("string"))
     for numeric_column, spark_type in [
         ("Quantity", "int"),
         ("Unit_Price", "double"),
@@ -201,17 +216,9 @@ def clean_and_enrich_silver(
         if numeric_column not in typed_df.columns:
             typed_df = typed_df.withColumn(numeric_column, lit(None).cast(spark_type))
     if "Revenue" not in typed_df.columns:
-        typed_df = typed_df.withColumn(
-            "Revenue",
-            when(
-                col("Quantity").isNotNull()
-                & col("Unit_Price").isNotNull()
-                & col("Discount").isNotNull(),
-                col("Quantity").cast("double")
-                * col("Unit_Price").cast("double")
-                * (lit(1.0) - col("Discount").cast("double")),
-            ).otherwise(lit(None).cast("double")),
-        )
+        # Contract v2 không bắt upstream gửi Revenue; đây là số liệu audit
+        # tùy chọn, không được gán công thức rồi gọi nhầm là source value.
+        typed_df = typed_df.withColumn("Revenue", lit(None).cast("double"))
     if "Profit" not in typed_df.columns:
         typed_df = typed_df.withColumn(
             "Profit",
@@ -220,9 +227,11 @@ def clean_and_enrich_silver(
             ).otherwise(lit(None).cast("double")),
         )
     if "Shipping_Cost" not in typed_df.columns:
-        typed_df = typed_df.withColumn("Shipping_Cost", lit(0.0))
+        # Chi phí vận chuyển chỉ có nghĩa ở order-level; giữ NULL khi nguồn
+        # chưa cung cấp để tránh cộng thiếu dữ liệu thành giá trị bằng 0.
+        typed_df = typed_df.withColumn("Shipping_Cost", lit(None).cast("double"))
     if "Shipping_Days" not in typed_df.columns:
-        typed_df = typed_df.withColumn("Shipping_Days", lit(0))
+        typed_df = typed_df.withColumn("Shipping_Days", lit(None).cast("int"))
     if "Order_Date" not in typed_df.columns:
         typed_df = typed_df.withColumn("Order_Date", lit(None).cast("date"))
     if "Source_Updated_At" not in typed_df.columns:
@@ -299,16 +308,17 @@ def clean_and_enrich_silver(
         )
 
     # Đánh giá điều kiện Hợp lệ và Phân lập Quarantine
+    # Các trường dưới đây là bắt buộc cho UPSERT. Shipping_Cost và
+    # Shipping_Days thuộc order-level, không được dùng để loại một line event.
     required_cols = [
         "Order_ID",
         "Order_Date",
+        "Customer_ID",
+        "Order_Status",
         "Quantity",
         "Unit_Price",
-        "Revenue",
+        "Discount",
         "Cost",
-        "Profit",
-        "Shipping_Cost",
-        "Shipping_Days",
     ]
     null_cond = col("Order_ID").isNotNull()
     for c in required_cols[1:]:
@@ -318,8 +328,8 @@ def clean_and_enrich_silver(
         (col("Quantity") > 0)
         & (col("Unit_Price") >= 0)
         & (col("Discount").between(0, 1))
-        & (col("Revenue") >= 0)
-        & (col("Shipping_Days") >= 0)
+        & (col("Cost") >= 0)
+        & (col("Shipping_Days").isNull() | (col("Shipping_Days") >= 0))
     )
 
     # coalesce(..., false) rất quan trọng: trong Spark, filter(NULL) loại dòng khỏi
@@ -329,9 +339,15 @@ def clean_and_enrich_silver(
     else:
         line_id_present = col("Order_Line_ID").isNotNull() & (trim(col("Order_Line_ID")) != "")
     valid_operation = col("Operation").isin("UPSERT", "DELETE")
+    valid_status = col("Order_Status").isin(
+        "Processing", "Shipped", "Delivered", "Returned", "Cancelled"
+    )
     valid_timestamp = col("Source_Updated_At").isNotNull()
     valid_upsert = (
-        coalesce(null_cond & business_cond, lit(False)) & valid_operation & valid_timestamp
+        coalesce(null_cond & business_cond, lit(False))
+        & valid_operation
+        & valid_status
+        & valid_timestamp
     )
     if "Product_ID" in typed_df.columns:
         valid_upsert = valid_upsert & col("Product_ID").isNotNull()
@@ -365,6 +381,8 @@ def clean_and_enrich_silver(
             array(
                 when(~coalesce(null_cond, lit(False)), lit("MISSING_REQUIRED_FIELDS")),
                 when(~order_id_present, lit("MISSING_ORDER_ID")),
+                when(is_upsert & col("Customer_ID").isNull(), lit("MISSING_CUSTOMER_ID")),
+                when(is_upsert & col("Order_Status").isNull(), lit("MISSING_ORDER_STATUS")),
                 when(~line_id_present, lit("MISSING_LINE_ID"))
                 if not allow_line_id_fallback
                 else lit(None),
@@ -383,15 +401,15 @@ def clean_and_enrich_silver(
                     is_upsert & (col("Discount").isNull() | ~col("Discount").between(0, 1)),
                     lit("INVALID_DISCOUNT"),
                 ),
-                when(col("Revenue").isNull() | (col("Revenue") < 0), lit("INVALID_REVENUE")),
                 when(
-                    is_upsert & (col("Shipping_Days").isNull() | (col("Shipping_Days") < 0)),
+                    is_upsert & col("Shipping_Days").isNotNull() & (col("Shipping_Days") < 0),
                     lit("INVALID_SHIPPING_DAYS"),
                 ),
                 when(
                     col("Operation").isNull() | ~col("Operation").isin("UPSERT", "DELETE"),
                     lit("INVALID_OPERATION"),
                 ),
+                when(is_upsert & ~valid_status, lit("INVALID_ORDER_STATUS")),
                 when(col("Source_Updated_At").isNull(), lit("INVALID_UPDATED_AT")),
                 when(event_time_order_invalid, lit("INVALID_EVENT_TIME")),
                 when(
@@ -404,12 +422,13 @@ def clean_and_enrich_silver(
         )
 
         rejected_df = (
-            rejected_df.withColumn("rejection_reasons", all_reasons_arr)
+            rejected_df.withColumn("error_codes", all_reasons_arr)
+            .withColumn("rejection_reasons", col("error_codes"))
             .withColumn(
                 "rejection_reason",
-                when(
-                    size(col("rejection_reasons")) > 0, concat_ws("; ", col("rejection_reasons"))
-                ).otherwise(lit("DATA_CONTRACT_VIOLATION")),
+                when(size(col("error_codes")) > 0, concat_ws("; ", col("error_codes"))).otherwise(
+                    lit("DATA_CONTRACT_VIOLATION")
+                ),
             )
             .withColumn("rejected_at", current_timestamp())
         )
@@ -431,17 +450,17 @@ def clean_and_enrich_silver(
                 LOGGER.exception("Không thể lưu Quarantine table Delta")
                 raise
 
-    # Đặt tên rõ nghĩa cho chỉ số mức đơn: Order_Total_Revenue
-    # CẢNH BÁO KIMBALL GRAIN: Giá trị lặp lại ở từng dòng sản phẩm (line-item grain);
-    # Tuyệt đối không SUM(Order_Total_Revenue) khi chưa deduplicate Order_ID!
-    order_window = Window.partitionBy("Order_ID")
-    clean_df = clean_df.withColumn(
-        "Order_Total_Revenue", round(spark_sum("Revenue").over(order_window), 2)
+    # Silver line không tạo chỉ số cấp đơn lặp lại trên từng dòng. Các cột
+    # Source_* chỉ phục vụ audit; số liệu certified phải tính lại từ nguyên liệu.
+    clean_df = (
+        clean_df.withColumnRenamed("Revenue", "Source_Revenue")
+        .withColumnRenamed("Profit", "Source_Profit")
+        .withColumn("Gross_Amount", round(col("Quantity") * col("Unit_Price"), 2))
+        .withColumn("Discount_Amount", round(col("Gross_Amount") * col("Discount"), 2))
+        .withColumn("Net_Line_Amount", round(col("Gross_Amount") - col("Discount_Amount"), 2))
+        .withColumn("Cost_Amount", round(col("Quantity") * col("Cost"), 2))
+        .withColumn("Gross_Profit", round(col("Net_Line_Amount") - col("Cost_Amount"), 2))
     )
-    clean_df = clean_df.withColumn(
-        "Revenue_Per_Order", col("Order_Total_Revenue")
-    )  # Alias tương thích ngược
-    clean_df = clean_df.withColumn("Net_Profit", col("Profit") - col("Shipping_Cost"))
     clean_df = clean_df.withColumn(
         "Is_Deleted", when(col("Operation") == "DELETE", lit(True)).otherwise(lit(False))
     )
@@ -518,3 +537,101 @@ def clean_and_enrich_silver(
 
     LOGGER.info("Hoàn tất xử lý Silver Layer với %d dòng bản ghi sạch.", clean_count)
     return clean_df
+
+
+def _latest_event(df: Any, keys: list[str]) -> Any:
+    """Chọn version mới nhất, chỉ dùng tie-breaker kỹ thuật khi timestamp bằng nhau."""
+    order_columns = [col("Source_Updated_At").desc_nulls_last()]
+    if "_source_row_number" in df.columns:
+        order_columns.append(col("_source_row_number").desc_nulls_last())
+    if "_record_hash" in df.columns:
+        order_columns.append(col("_record_hash").desc_nulls_last())
+    window = Window.partitionBy(*keys).orderBy(*order_columns)
+    return (
+        df.withColumn("_latest_row", row_number().over(window))
+        .filter(col("_latest_row") == 1)
+        .drop("_latest_row")
+    )
+
+
+def build_silver_order_lines_current(events_df: Any) -> Any:
+    """Dựng Silver line current-state, grain `(Order_ID, Order_Line_ID)`."""
+    latest = _latest_event(events_df, ["Order_ID", "Order_Line_ID"])
+    columns = [
+        "Order_ID",
+        "Order_Line_ID",
+        "Product_ID",
+        "Product_Name",
+        "Category",
+        "Sub_Category",
+        "Quantity",
+        "Unit_Price",
+        "Discount",
+        "Source_Revenue",
+        "Source_Profit",
+        "Gross_Amount",
+        "Discount_Amount",
+        "Net_Line_Amount",
+        "Cost_Amount",
+        "Gross_Profit",
+        "Order_Date",
+        "Source_Updated_At",
+        "Operation",
+        "Is_Deleted",
+        "_record_hash",
+        "_run_id",
+        "_batch_id",
+        "_source_hash",
+        "_source_uri",
+        "_source_row_number",
+        "_ingested_at",
+        "_contract_version",
+        "_pipeline_version",
+    ]
+    return latest.select(*[col(name) for name in columns if name in latest.columns])
+
+
+def build_silver_orders_current(events_df: Any) -> Any:
+    """Dựng Silver order current-state, grain `Order_ID`."""
+    order_source = events_df
+    if "Order_Operation" not in events_df.columns and "Operation" in events_df.columns:
+        order_source = events_df.filter(col("Operation") != "DELETE")
+    latest = _latest_event(order_source, ["Order_ID"])
+    # Event v2 hiện tại là line feed: DELETE một line không được xóa cả order.
+    # Khi OMS có order feed riêng, adapter sẽ truyền Order_Operation để bật soft delete
+    # ở header; nếu chưa có thì header vẫn active.
+    if "Order_Operation" in latest.columns:
+        latest = latest.withColumn(
+            "Is_Deleted",
+            col("Order_Operation") == "DELETE",
+        )
+    else:
+        latest = latest.withColumn("Is_Deleted", lit(False))
+    columns = [
+        "Order_ID",
+        "Order_Date",
+        "Customer_ID",
+        "Customer_Gender",
+        "Customer_Segment",
+        "Order_Status",
+        "Payment_Method",
+        "Shipping_Method",
+        "Shipping_Cost",
+        "Shipping_Days",
+        "Delivery_Level",
+        "Region",
+        "Country",
+        "Source_Updated_At",
+        "Operation",
+        "Is_Deleted",
+        "_record_hash",
+        "_run_id",
+        "_batch_id",
+        "_source_hash",
+        "_source_uri",
+        "_source_row_number",
+        "_ingested_at",
+        "_contract_version",
+        "_pipeline_version",
+    ]
+    return latest.select(*[col(name) for name in columns if name in latest.columns])

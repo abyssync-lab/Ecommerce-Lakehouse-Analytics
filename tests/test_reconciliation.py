@@ -44,10 +44,10 @@ def test_gold_revenue_reconciles_with_silver_and_marts(spark_session):
     marts = build_all_marts(clean_df)
 
     # 1. Doanh thu tầng Silver
-    silver_revenue = round(clean_df.select(spark_sum("Revenue")).collect()[0][0], 2)
+    silver_revenue = round(clean_df.select(spark_sum("Net_Line_Amount")).collect()[0][0], 2)
 
     # 2. Doanh thu tầng FactSales
-    fact_revenue = round(fact.select(spark_sum("Revenue")).collect()[0][0], 2)
+    fact_revenue = round(fact.select(spark_sum("Net_Line_Amount")).collect()[0][0], 2)
 
     # 3. Doanh thu Mart Overview
     overview_revenue = round(marts["mart_overview"].select("Total_Revenue").collect()[0][0], 2)

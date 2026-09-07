@@ -24,6 +24,7 @@ except ImportError:
     col = current_timestamp = input_file_name = lit = sha2 = struct = to_json = None  # type: ignore
 
 from .contracts.loader import load_contract_for_columns
+from .file_manifest import FileManifest
 from .registry import BatchRegistry
 
 LOGGER = logging.getLogger(__name__)
@@ -187,12 +188,13 @@ def read_raw_csv(spark: Any, input_path: str | None = None) -> Any:
     # Đọc toàn bộ header dưới dạng string để hỗ trợ đồng thời historical v1 và
     # change-event v2; kiểu dữ liệu chỉ được cast sau khi qua file-level contract.
     raw_df = spark.read.option("header", True).option("inferSchema", False).csv(target_path)
-    validate_raw_schema(raw_df)
     raw_count = raw_df.count()
     LOGGER.info("Đã đọc xong dữ liệu thô, tổng số dòng: %,d", raw_count)
 
     if raw_count == 0:
         raise ValueError("FILE_EMPTY: file nguồn không có dòng dữ liệu")
+
+    validate_raw_schema(raw_df)
 
     return raw_df
 
@@ -227,17 +229,30 @@ def ingest_to_bronze(
     rid = run_id or f"run_{uuid.uuid4().hex[:8]}"
 
     registry = BatchRegistry(spark)
+    manifest = FileManifest(spark)
+    source_system = "ecommerce_csv"
 
-    # Chặn nạp trùng lặp nếu batch hash này đã từng nạp thành công (Chỉ áp dụng cho chế độ append)
-    if mode == "append" and registry.is_batch_processed(content_hash):
+    # File ledger quyết định Bronze đã commit hay chưa. Registry chỉ quản lý
+    # lifecycle của run nên không được dùng để kiểm soát append của file.
+    if mode == "append" and manifest.is_bronze_committed(source_system, content_hash):
         LOGGER.warning(
-            "Batch %s (Source Hash: %s) ĐÃ ĐƯỢC XỬ LÝ THÀNH CÔNG TRƯỚC ĐÓ. "
-            "Bỏ qua append để bảo đảm tính lũy đẳng (Replay-Safe).",
+            "File %s (Source Hash: %s) đã commit Bronze. Đọc lại Bronze, không append lại.",
             bid,
             content_hash[:10],
         )
         bronze_path = SETTINGS.get_storage_path(SETTINGS.bronze_delta)
-        return spark.read.format("delta").load(bronze_path)
+        return (
+            spark.read.format("delta").load(bronze_path).filter(col("_source_hash") == content_hash)
+        )
+
+    manifest.register_discovered(
+        source_system=source_system,
+        source_hash=content_hash,
+        source_uri=target_path,
+        file_size_bytes=calculate_source_size(target_path),
+        contract_version=contract_version or ("2.0.0" if mode == "append" else "1.0.0"),
+        run_id=rid,
+    )
 
     # Register trước khi đọc file để FILE_SCHEMA_MISMATCH/FILE_EMPTY cũng có
     # lifecycle và retry history trong control plane.
@@ -265,6 +280,12 @@ def ingest_to_bronze(
             contract_version=contract_version,
         )
         save_and_verify_delta(bronze_df, SETTINGS.bronze_delta, "bronze.ecommerce_raw", mode=mode)
+        manifest.mark_bronze_committed(
+            source_system=source_system,
+            source_hash=content_hash,
+            run_id=rid,
+            raw_rows=raw_count,
+        )
 
         if manage_registry:
             registry.update_metrics(rid, raw_rows=raw_count)
@@ -275,6 +296,13 @@ def ingest_to_bronze(
         LOGGER.info("Đã hoàn tất Ingestion tầng Bronze Delta (chế độ: %s, Batch: %s).", mode, bid)
         return bronze_df
     except Exception as exc:
+        manifest.mark_failed(
+            source_system=source_system,
+            source_hash=content_hash,
+            run_id=rid,
+            error_code="BRONZE_INGESTION_FAILED",
+            error_message=str(exc),
+        )
         if manage_registry and registry.find_by_run_id(rid) is not None:
             registry.mark_failed(rid, exc, error_code="BRONZE_INGESTION_FAILED")
         raise

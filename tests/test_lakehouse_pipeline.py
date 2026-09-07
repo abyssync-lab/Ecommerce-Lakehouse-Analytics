@@ -11,7 +11,12 @@ if str(SOURCE_DIR) not in sys.path:
     sys.path.insert(0, str(SOURCE_DIR))
 
 from lakehouse.dimensions import build_all_dimensions, build_dim_customer, build_dim_customer_scd2
-from lakehouse.marts import build_abc_mart, build_fact_sales, build_rfm_mart
+from lakehouse.marts import (
+    build_abc_mart,
+    build_fact_sales,
+    build_mart_order_summary,
+    build_rfm_mart,
+)
 from lakehouse.silver import clean_and_enrich_silver
 from pyspark.sql.functions import col
 
@@ -104,8 +109,8 @@ def test_dim_customer_scd2(spark_session):
     assert records[2]["Is_Current"] == 1
 
 
-def test_revenue_per_order_window_and_quarantine(spark_session, tmp_path):
-    """Kiểm tra Order_Total_Revenue được cộng dồn theo Order_ID và phân lập Quarantine lưu đa lỗi."""
+def test_certified_line_amount_and_quarantine(spark_session, tmp_path):
+    """Kiểm tra line amount certified và không nhân Shipping_Cost theo số line."""
     data = [
         ("ORD01", "2026-08-01", 2026, 8, "C001", "Laptop", "Electronics", "Tech", 1, 1000.0, 0.0, 1000.0, 700.0, 300.0, 20.0, 2, "Delivered"),
         ("ORD01", "2026-08-01", 2026, 8, "C001", "Mouse", "Electronics", "Tech", 2, 25.0, 0.0, 50.0, 30.0, 20.0, 5.0, 1, "Delivered"),
@@ -124,13 +129,13 @@ def test_revenue_per_order_window_and_quarantine(spark_session, tmp_path):
     # Valid rows must be 2
     assert clean_df.count() == 2
 
-    # Order_Total_Revenue for ORD01 must be 1000.0 + 50.0 = 1050.0
-    ord01_rev = clean_df.filter(col("Order_ID") == "ORD01").select("Order_Total_Revenue").collect()[0][0]
-    assert ord01_rev == 1050.0
+    amounts = clean_df.filter(col("Order_ID") == "ORD01").select("Net_Line_Amount").collect()
+    assert sorted(row[0] for row in amounts) == [50.0, 1000.0]
 
-    # Backward compatibility alias
-    ord01_rev_alias = clean_df.filter(col("Order_ID") == "ORD01").select("Revenue_Per_Order").collect()[0][0]
-    assert ord01_rev_alias == 1050.0
+    order_summary = build_mart_order_summary(clean_df)
+    order = order_summary.filter(col("Order_ID") == "ORD01").collect()[0]
+    assert order["Order_Total_Revenue"] == 1050.0
+    assert order["Order_Shipping_Cost"] == 20.0
 
     # Check Order_Line_ID existence and uniqueness
     assert "Order_Line_ID" in clean_df.columns

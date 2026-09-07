@@ -25,17 +25,27 @@ from pyspark.sql.functions import array, col, current_timestamp, lit, row_number
 from pyspark.sql.window import Window
 
 from .dimensions import build_all_dimensions
+from .file_manifest import FileManifest
 from .ingestion import (
     calculate_source_hash,
     calculate_source_size,
     enrich_with_ingestion_metadata,
     ingest_to_bronze,
 )
-from .marts import build_all_marts, build_fact_sales, build_sales_enriched
+from .marts import (
+    build_certified_marts,
+    build_fact_order_fulfillment,
+    build_fact_sales,
+    build_sales_enriched,
+)
 from .publication import persist_gold_staging, publish_gold_run
 from .reconciliation import run_full_reconciliation
 from .registry import BatchRegistry
-from .silver import clean_and_enrich_silver
+from .silver import (
+    build_silver_order_lines_current,
+    build_silver_orders_current,
+    clean_and_enrich_silver,
+)
 from .storage import (
     check_schema_enforcement,
     check_versioning_and_time_travel,
@@ -54,16 +64,41 @@ except ImportError as error:
 LOGGER = logging.getLogger(__name__)
 
 
-def _enforce_reject_rate(raw_rows: int, rejected_rows: int) -> None:
+def _enforce_reject_rate(
+    raw_rows: int, rejected_rows: int, max_reject_rate: float | None = None
+) -> None:
     """Chặn batch có tỷ lệ quarantine vượt ngưỡng vận hành đã cấu hình."""
     if raw_rows <= 0:
         return
+    threshold = SETTINGS.max_reject_rate if max_reject_rate is None else max_reject_rate
     reject_rate = rejected_rows / raw_rows
-    if reject_rate > SETTINGS.max_reject_rate:
+    if reject_rate > threshold:
         raise ValueError(
-            "REJECT_RATE_EXCEEDED: tỷ lệ quarantine "
-            f"{reject_rate:.2%} vượt ngưỡng {SETTINGS.max_reject_rate:.2%}"
+            f"REJECT_RATE_EXCEEDED: tỷ lệ quarantine {reject_rate:.2%} vượt ngưỡng {threshold:.2%}"
         )
+
+
+def _customer_history_source(spark: SparkSession, fallback_df: Any, use_scd2: bool) -> Any | None:
+    """Lấy customer event history từ Bronze để SCD2 không mất version cũ."""
+    if not use_scd2:
+        return None
+    bronze_path = SETTINGS.get_storage_path(SETTINGS.bronze_delta)
+    if not DeltaTable.isDeltaTable(spark, bronze_path):
+        return fallback_df
+    history = spark.read.format("delta").load(bronze_path)
+    if "Operation" in history.columns:
+        history = history.filter(col("Operation") != "DELETE")
+    if "Customer_ID" not in history.columns:
+        return fallback_df
+    history = history.filter(col("Customer_ID").isNotNull())
+    for column in ("Customer_Gender", "Customer_Segment"):
+        if column not in history.columns:
+            history = history.withColumn(column, lit("Unknown"))
+    if "Order_Date" not in history.columns:
+        history = history.withColumn("Order_Date", lit(None).cast("date"))
+    if "_record_hash" in history.columns:
+        history = history.dropDuplicates(["_record_hash"])
+    return history
 
 
 @dataclass
@@ -222,7 +257,9 @@ def run_pipeline(
         bronze_df = ingest_to_bronze(
             spark,
             effective_input,
-            mode="overwrite",
+            # Bootstrap bình thường vẫn append vào Bronze bất biến. Việc xóa dữ liệu
+            # chỉ được thực hiện bởi lệnh reset-demo có chủ đích.
+            mode="append",
             batch_id=batch_id,
             run_id=run_id,
             source_hash=source_hash,
@@ -254,7 +291,11 @@ def run_pipeline(
             bronze_rows - bronze_df.dropDuplicates(subset=bronze_business_columns).count()
         )
         quarantine_rows = max(0, bronze_rows - silver_rows - duplicate_rows)
-        _enforce_reject_rate(bronze_rows, quarantine_rows)
+        _enforce_reject_rate(
+            bronze_rows,
+            quarantine_rows,
+            config.max_reject_rate if config else None,
+        )
         registry.update_metrics(
             run_id,
             exact_duplicate_rows=duplicate_rows,
@@ -265,15 +306,45 @@ def run_pipeline(
         save_and_verify_delta(
             clean_df, SETTINGS.silver_delta, "silver.ecommerce_clean", mode="overwrite"
         )
+        # Hai bảng current-state có grain rõ ràng; bảng combined ở trên chỉ
+        # giữ tương thích ngược trong giai đoạn chuyển đổi source code.
+        silver_orders_current = build_silver_orders_current(clean_df)
+        silver_order_lines_current = build_silver_order_lines_current(clean_df)
+        save_and_verify_delta(
+            silver_orders_current,
+            SETTINGS.silver_orders_delta,
+            "silver.silver_orders_current",
+            mode="overwrite",
+        )
+        save_and_verify_delta(
+            silver_order_lines_current,
+            SETTINGS.silver_order_lines_delta,
+            "silver.silver_order_lines_current",
+            mode="overwrite",
+        )
         registry.mark_silver_merged(run_id)
 
         # 3. Gold: build star schema và semantic marts từ cùng một Silver snapshot.
         LOGGER.info("--- 4. GOLD LAYER - STAR SCHEMA (SCD2=%s) ---", effective_scd2)
-        dimensions = build_all_dimensions(spark, clean_df, use_scd2=effective_scd2)
+        dimensions = build_all_dimensions(
+            spark,
+            clean_df,
+            use_scd2=effective_scd2,
+            customer_history_df=_customer_history_source(spark, clean_df, effective_scd2),
+        )
         fact_sales = build_fact_sales(clean_df, dimensions)
+        fact_order_fulfillment = build_fact_order_fulfillment(
+            silver_orders_current,
+            silver_order_lines_current,
+            dimensions,
+        )
         persist_gold_staging(
             spark,
-            {**dimensions, "fact_sales": fact_sales},
+            {
+                **dimensions,
+                "fact_sales_line": fact_sales,
+                "fact_order_fulfillment": fact_order_fulfillment,
+            },
             run_id,
             "gold_star",
         )
@@ -286,7 +357,7 @@ def run_pipeline(
             run_id,
             "gold_semantic",
         )
-        gold_marts = build_all_marts(sales_enriched)
+        gold_marts = build_certified_marts(sales_enriched, fact_order_fulfillment)
         persist_gold_staging(spark, gold_marts, run_id, "gold_mart")
         registry.update_status(run_id, "GOLD_BUILT", gold_run_id=run_id)
 
@@ -295,12 +366,15 @@ def run_pipeline(
         recon_report = run_full_reconciliation(
             clean_df=clean_df,
             fact_sales=fact_sales,
-            mart_overview=gold_marts["mart_overview"],
+            mart_overview=gold_marts["mart_executive_daily"],
             dim_customer=dimensions["dim_customer"],
             raw_count=bronze_rows,
             duplicate_count=duplicate_rows,
             invalid_count=quarantine_rows,
             run_id=run_id,
+            silver_orders_current=silver_orders_current,
+            silver_order_lines_current=silver_order_lines_current,
+            fact_order_fulfillment=fact_order_fulfillment,
         )
         if recon_report.get("overall_status") != "PASS":
             raise PipelineCertificationError(
@@ -312,21 +386,25 @@ def run_pipeline(
             run_delta_demo(spark)
 
         registry.mark_reconciled(run_id)
+        registry.mark_ready_to_publish(run_id)
         publish_gold_run(
             spark,
             {
                 **dimensions,
-                "fact_sales": fact_sales,
+                "fact_sales_line": fact_sales,
+                "fact_order_fulfillment": fact_order_fulfillment,
                 "gold_sales_enriched": sales_enriched,
                 **gold_marts,
             },
             run_id,
         )
-        registry.mark_published(
-            run_id,
-            gold_run_id=run_id,
-            published_version="1",
-        )
+        try:
+            registry.mark_published(run_id, gold_run_id=run_id, published_version="1")
+        except Exception as finalization_error:
+            # Pointer đã commit thì run không được gắn FAILED, vì Power BI đã
+            # nhìn thấy run này; operator cần xử lý trạng thái control pending.
+            registry.mark_control_finalization_pending(run_id, finalization_error)
+            raise
 
         LOGGER.info("HOÀN THÀNH DATA LAKEHOUSE PIPELINE THÀNH CÔNG (CERTIFIED PASS)!")
         return PipelineRunResult(
@@ -344,15 +422,17 @@ def run_pipeline(
         )
     except Exception as exc:
         # Registry write failure phải được giữ nguyên để operator biết control plane hỏng.
-        registry.mark_failed(
-            run_id,
-            exc,
-            error_code=(
-                "RECONCILIATION_FAILED"
-                if isinstance(exc, PipelineCertificationError)
-                else "PIPELINE_FAILED"
-            ),
-        )
+        current = registry.find_by_run_id(run_id)
+        if current is None or current["status"] != "CONTROL_FINALIZATION_PENDING":
+            registry.mark_failed(
+                run_id,
+                exc,
+                error_code=(
+                    "RECONCILIATION_FAILED"
+                    if isinstance(exc, PipelineCertificationError)
+                    else "PIPELINE_FAILED"
+                ),
+            )
         raise
     finally:
         if clean_df is not None:
@@ -404,6 +484,7 @@ def run_incremental_pipeline(
         spark = create_spark_session()
 
     registry = BatchRegistry(spark)
+    manifest = FileManifest(spark)
     shash = source_hash
     source_location = source_uri or "incremental_dataframe"
 
@@ -446,17 +527,68 @@ def run_incremental_pipeline(
                 + ", ".join(sorted(missing_event_columns))
             )
 
-        # 1. Bronze append: giữ nguyên event nguồn và bổ sung lineage metadata.
-        enriched_batch = enrich_with_ingestion_metadata(
-            new_batch_df,
-            batch_id=bid,
-            run_id=run_id,
-            source_hash=shash,
-            source_uri=source_location,
-            contract_version="2.0.0",
-        )
         bronze_path = SETTINGS.get_storage_path(SETTINGS.bronze_delta)
-        enriched_batch.write.format("delta").mode("append").save(bronze_path)
+        bronze_has_source = DeltaTable.isDeltaTable(spark, bronze_path) and (
+            spark.read.format("delta")
+            .load(bronze_path)
+            .filter(col("_source_hash") == shash)
+            .limit(1)
+            .count()
+            > 0
+        )
+        if manifest.is_bronze_committed("ecommerce_csv", shash) or bronze_has_source:
+            # Retry sau Gold failure: Bronze đã an toàn, chỉ đọc lại đúng file
+            # theo content hash và tiếp tục Silver/Gold.
+            enriched_batch = (
+                spark.read.format("delta").load(bronze_path).filter(col("_source_hash") == shash)
+            )
+            if not manifest.is_bronze_committed("ecommerce_csv", shash):
+                # Khôi phục manifest nếu process chết sau Delta commit nhưng
+                # trước bước cập nhật control plane.
+                manifest.register_discovered(
+                    source_system="ecommerce_csv",
+                    source_hash=shash,
+                    source_uri=source_location,
+                    file_size_bytes=calculate_source_size(source_location),
+                    contract_version="2.0.0",
+                    run_id=run_id,
+                )
+                manifest.mark_bronze_committed(
+                    source_system="ecommerce_csv",
+                    source_hash=shash,
+                    run_id=run_id,
+                    raw_rows=enriched_batch.count(),
+                )
+            LOGGER.info(
+                "Retry run=%s dùng lại Bronze đã commit cho source_hash=%s; không append.",
+                run_id,
+                shash[:10],
+            )
+        else:
+            manifest.register_discovered(
+                source_system="ecommerce_csv",
+                source_hash=shash,
+                source_uri=source_location,
+                file_size_bytes=calculate_source_size(source_location),
+                contract_version="2.0.0",
+                run_id=run_id,
+            )
+            # Bronze chỉ append raw event và metadata; không cập nhật current state ở đây.
+            enriched_batch = enrich_with_ingestion_metadata(
+                new_batch_df,
+                batch_id=bid,
+                run_id=run_id,
+                source_hash=shash,
+                source_uri=source_location,
+                contract_version="2.0.0",
+            )
+            enriched_batch.write.format("delta").mode("append").save(bronze_path)
+            manifest.mark_bronze_committed(
+                source_system="ecommerce_csv",
+                source_hash=shash,
+                run_id=run_id,
+                raw_rows=raw_count,
+            )
         registry.mark_validated(run_id)
         LOGGER.info(
             "Đã append %d dòng bản ghi mới vào Bronze Delta table (Batch: %s).", raw_count, bid
@@ -495,7 +627,11 @@ def run_incremental_pipeline(
         batch_duplicate_count = raw_count - deduplicated_batch_count
         batch_rejected_count = max(0, raw_count - batch_duplicate_count - valid_count)
         sequence_conflict_count = 0
-        _enforce_reject_rate(raw_count, batch_rejected_count)
+        _enforce_reject_rate(
+            raw_count,
+            batch_rejected_count,
+            config.max_reject_rate if config else None,
+        )
 
         # 3. Silver MERGE: chỉ dùng stable key của contract v2, tuyệt đối không fallback
         # sang Product_Name hay các thuộc tính mutable.
@@ -572,7 +708,11 @@ def run_incremental_pipeline(
                 )
                 valid_count -= sequence_conflict_count
                 batch_rejected_count += sequence_conflict_count
-                _enforce_reject_rate(raw_count, batch_rejected_count)
+                _enforce_reject_rate(
+                    raw_count,
+                    batch_rejected_count,
+                    config.max_reject_rate if config else None,
+                )
 
                 # Tính lại comparison trên đúng tập event được phép merge.
                 comparison = merge_batch.alias("source").join(
@@ -671,6 +811,22 @@ def run_incremental_pipeline(
                 silver_inserts, SETTINGS.silver_delta, "silver.ecommerce_clean", mode="append"
             )
         superseded_count = valid_count - merge_batch.count()
+        # Đồng bộ hai current-state table sau khi MERGE line events hoàn tất.
+        full_merged_events = spark.read.format("delta").load(silver_path)
+        silver_orders_current = build_silver_orders_current(full_merged_events)
+        silver_order_lines_current = build_silver_order_lines_current(full_merged_events)
+        save_and_verify_delta(
+            silver_orders_current,
+            SETTINGS.silver_orders_delta,
+            "silver.silver_orders_current",
+            mode="overwrite",
+        )
+        save_and_verify_delta(
+            silver_order_lines_current,
+            SETTINGS.silver_order_lines_delta,
+            "silver.silver_order_lines_current",
+            mode="overwrite",
+        )
         registry.update_metrics(
             run_id,
             raw_rows=raw_count,
@@ -692,11 +848,25 @@ def run_incremental_pipeline(
         LOGGER.info("--- 4. REFRESH GOLD CORE & MARTS TỪ SILVER (SCD2=%s) ---", effective_scd2)
         full_silver = spark.read.format("delta").load(silver_path)
         active_silver = full_silver.filter("Is_Deleted = false OR Is_Deleted IS NULL")
-        dimensions = build_all_dimensions(spark, active_silver, use_scd2=effective_scd2)
+        dimensions = build_all_dimensions(
+            spark,
+            active_silver,
+            use_scd2=effective_scd2,
+            customer_history_df=_customer_history_source(spark, active_silver, effective_scd2),
+        )
         fact_sales = build_fact_sales(active_silver, dimensions)
+        fact_order_fulfillment = build_fact_order_fulfillment(
+            silver_orders_current,
+            silver_order_lines_current,
+            dimensions,
+        )
         persist_gold_staging(
             spark,
-            {**dimensions, "fact_sales": fact_sales},
+            {
+                **dimensions,
+                "fact_sales_line": fact_sales,
+                "fact_order_fulfillment": fact_order_fulfillment,
+            },
             run_id,
             "gold_star",
         )
@@ -709,7 +879,7 @@ def run_incremental_pipeline(
             "gold_semantic",
         )
 
-        gold_marts = build_all_marts(sales_enriched)
+        gold_marts = build_certified_marts(sales_enriched, fact_order_fulfillment)
         persist_gold_staging(spark, gold_marts, run_id, "gold_mart")
         registry.update_status(run_id, "GOLD_BUILT", gold_run_id=run_id)
 
@@ -717,13 +887,16 @@ def run_incremental_pipeline(
         recon_report = run_full_reconciliation(
             clean_df=active_silver,
             fact_sales=fact_sales,
-            mart_overview=gold_marts["mart_overview"],
+            mart_overview=gold_marts["mart_executive_daily"],
             dim_customer=dimensions["dim_customer"],
             raw_count=raw_count,
             duplicate_count=batch_duplicate_count,
             invalid_count=batch_rejected_count,
             run_id=run_id,
             valid_count=valid_count,
+            silver_orders_current=silver_orders_current,
+            silver_order_lines_current=silver_order_lines_current,
+            fact_order_fulfillment=fact_order_fulfillment,
         )
 
         if recon_report.get("overall_status") != "PASS":
@@ -732,17 +905,23 @@ def run_incremental_pipeline(
             )
 
         registry.mark_reconciled(run_id)
+        registry.mark_ready_to_publish(run_id)
         publish_gold_run(
             spark,
             {
                 **dimensions,
-                "fact_sales": fact_sales,
+                "fact_sales_line": fact_sales,
+                "fact_order_fulfillment": fact_order_fulfillment,
                 "gold_sales_enriched": sales_enriched,
                 **gold_marts,
             },
             run_id,
         )
-        registry.mark_published(run_id, gold_run_id=run_id, published_version="2")
+        try:
+            registry.mark_published(run_id, gold_run_id=run_id, published_version="2")
+        except Exception as finalization_error:
+            registry.mark_control_finalization_pending(run_id, finalization_error)
+            raise
 
         LOGGER.info("--- THÀNH CÔNG: INCREMENTAL PIPELINE HOÀN TẤT VÀ ĐƯỢC CHỨNG NHẬN ---")
         return PipelineRunResult(
@@ -761,13 +940,15 @@ def run_incremental_pipeline(
     except Exception as exc:
         # Bất kỳ lỗi nào ở Bronze/Silver/Gold/Reconciliation đều phải làm control plane
         # chuyển FAILED để lần retry sau được phân biệt với một run đang chạy dở.
-        registry.mark_failed(
-            run_id,
-            exc,
-            error_code=(
-                "RECONCILIATION_FAILED"
-                if isinstance(exc, PipelineCertificationError)
-                else "PIPELINE_FAILED"
-            ),
-        )
+        current = registry.find_by_run_id(run_id)
+        if current is None or current["status"] != "CONTROL_FINALIZATION_PENDING":
+            registry.mark_failed(
+                run_id,
+                exc,
+                error_code=(
+                    "RECONCILIATION_FAILED"
+                    if isinstance(exc, PipelineCertificationError)
+                    else "PIPELINE_FAILED"
+                ),
+            )
         raise
