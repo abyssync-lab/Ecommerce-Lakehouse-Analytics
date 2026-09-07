@@ -1,68 +1,317 @@
-"""Module quản lý vòng đời Batch và kiểm soát tính lũy đẳng (Batch Registry & Idempotency Control).
+"""Control plane cho lifecycle của từng pipeline run.
 
-Lưu trữ sổ cái kiểm toán (Control Plane) cho toàn bộ các lượt nạp dữ liệu vào Lakehouse:
-- Trạng thái: RECEIVED -> PROCESSING -> SUCCESS / FAILED
-- Chống nạp trùng lặp (Replay-safe / Idempotent Ingestion) dựa trên SHA-256 checksum của file nguồn.
+Registry là bảng trạng thái hiện tại của một run, không phải event log append-only.
+Mỗi ``run_id`` chỉ có một dòng và mọi chuyển trạng thái đều cập nhật đúng dòng đó.
 """
 
 from __future__ import annotations
 
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any
 
 from config import SETTINGS
-
-try:
-    from pyspark.sql.functions import col, current_timestamp
-except ImportError:
-    col = current_timestamp = None  # type: ignore
+from delta.tables import DeltaTable
+from pyspark.sql.functions import col
+from pyspark.sql.types import (
+    LongType,
+    StringType,
+    StructField,
+    StructType,
+    TimestampType,
+)
 
 LOGGER = logging.getLogger(__name__)
 
 
+class BatchConflictError(RuntimeError):
+    """Báo lỗi khi cùng ``batch_id`` được dùng cho hai nội dung khác nhau."""
+
+
 class BatchRegistry:
-    """Quản lý trạng thái và nhật ký thực thi của từng Batch nguồn."""
+    """Quản lý một dòng trạng thái duy nhất cho mỗi lần chạy pipeline."""
+
+    REGISTRY_SCHEMA = StructType(
+        [
+            StructField("run_id", StringType(), nullable=False),
+            StructField("batch_id", StringType(), nullable=False),
+            StructField("source_system", StringType(), nullable=True),
+            StructField("source_uri", StringType(), nullable=True),
+            StructField("source_hash", StringType(), nullable=True),
+            StructField("source_size_bytes", LongType(), nullable=True),
+            StructField("status", StringType(), nullable=False),
+            StructField("started_at", TimestampType(), nullable=True),
+            StructField("completed_at", TimestampType(), nullable=True),
+            StructField("raw_rows", LongType(), nullable=True),
+            StructField("exact_duplicate_rows", LongType(), nullable=True),
+            StructField("rejected_rows", LongType(), nullable=True),
+            StructField("sequence_conflict_rows", LongType(), nullable=True),
+            StructField("valid_event_rows", LongType(), nullable=True),
+            StructField("superseded_rows", LongType(), nullable=True),
+            StructField("inserted_rows", LongType(), nullable=True),
+            StructField("updated_rows", LongType(), nullable=True),
+            StructField("unchanged_rows", LongType(), nullable=True),
+            StructField("stale_rows", LongType(), nullable=True),
+            StructField("deleted_rows", LongType(), nullable=True),
+            StructField("orphan_delete_rows", LongType(), nullable=True),
+            StructField("gold_run_id", StringType(), nullable=True),
+            StructField("published_version", StringType(), nullable=True),
+            StructField("error_code", StringType(), nullable=True),
+            StructField("error_message", StringType(), nullable=True),
+            StructField("pipeline_version", StringType(), nullable=True),
+            StructField("contract_version", StringType(), nullable=True),
+            StructField("last_updated_at", TimestampType(), nullable=True),
+        ]
+    )
+
+    METRIC_COLUMNS = {
+        "raw_rows",
+        "exact_duplicate_rows",
+        "rejected_rows",
+        "sequence_conflict_rows",
+        "valid_event_rows",
+        "superseded_rows",
+        "inserted_rows",
+        "updated_rows",
+        "unchanged_rows",
+        "stale_rows",
+        "deleted_rows",
+        "orphan_delete_rows",
+    }
 
     def __init__(self, spark: Any, registry_path: str | None = None) -> None:
         self.spark = spark
-        self.registry_path = registry_path or SETTINGS.get_storage_path(SETTINGS.ingestion_batches_delta)
+        self.registry_path = registry_path or SETTINGS.get_storage_path(
+            SETTINGS.ingestion_batches_delta
+        )
 
     def _delta_exists(self) -> bool:
-        try:
-            from delta.tables import DeltaTable
+        """Kiểm tra bảng tồn tại; lỗi Delta phải được phát ra, không được nuốt."""
+        exists = DeltaTable.isDeltaTable(self.spark, self.registry_path)
+        if exists:
+            actual = set(self.spark.read.format("delta").load(self.registry_path).columns)
+            expected = {field.name for field in self.REGISTRY_SCHEMA.fields}
+            missing = expected.difference(actual)
+            if missing:
+                raise RuntimeError(
+                    "ctl_pipeline_runs đang dùng schema cũ; cần migration trước khi chạy: "
+                    + ", ".join(sorted(missing))
+                )
+        return exists
 
-            return DeltaTable.isDeltaTable(self.spark, self.registry_path)
-        except Exception:
-            return False
+    @staticmethod
+    def _now() -> datetime:
+        return datetime.now(timezone.utc).replace(tzinfo=None)
 
-    def is_batch_processed(self, source_hash: str) -> bool:
-        """Kiểm tra mã băm nguồn đã từng được nạp và xử lý thành công (SUCCESS) hay chưa.
+    def _empty_payload(self) -> dict[str, Any]:
+        """Tạo payload đầy đủ schema để insert không làm drift schema."""
+        return {field.name: None for field in self.REGISTRY_SCHEMA.fields}
 
-        Args:
-            source_hash: Chuỗi SHA-256 hex digest của file nguồn.
+    def _merge(self, payload: dict[str, Any]) -> None:
+        """Upsert một phần trạng thái vào đúng ``run_id``."""
+        run_id = payload.get("run_id")
+        if not run_id:
+            raise ValueError("Registry payload bắt buộc phải có run_id")
 
-        Returns:
-            True nếu batch đã xử lý thành công trước đó, False nếu là batch mới hoặc từng thất bại.
-        """
-        if not source_hash or source_hash in {"hash_unspecified", "default_stream_source"}:
-            return False
+        existing = self.find_by_run_id(run_id) if self._delta_exists() else None
+        row = {
+            field.name: (existing[field.name] if existing is not None else None)
+            for field in self.REGISTRY_SCHEMA.fields
+        }
+        row.update(payload)
+        row["last_updated_at"] = row.get("last_updated_at") or self._now()
+        source_df = self.spark.createDataFrame([row], self.REGISTRY_SCHEMA)
 
         if not self._delta_exists():
-            return False
+            source_df.write.format("delta").mode("overwrite").save(self.registry_path)
+            return
 
-        try:
-            df = self.spark.read.format("delta").load(self.registry_path)
-            if "source_hash" not in df.columns or "status" not in df.columns:
-                return False
-            success_count = (
-                df.filter((col("source_hash") == source_hash) & (col("status") == "SUCCESS")).count()
+        table = DeltaTable.forPath(self.spark, self.registry_path)
+        update_values = {column: f"source.{column}" for column in payload if column != "run_id"}
+        update_values["last_updated_at"] = "source.last_updated_at"
+
+        insert_values = {
+            field.name: f"source.{field.name}" for field in self.REGISTRY_SCHEMA.fields
+        }
+
+        (
+            table.alias("target")
+            .merge(source_df.alias("source"), "target.run_id = source.run_id")
+            .whenMatchedUpdate(set=update_values)
+            .whenNotMatchedInsert(values=insert_values)
+            .execute()
+        )
+
+    def _read(self) -> Any:
+        if not self._delta_exists():
+            return None
+        return self.spark.read.format("delta").load(self.registry_path)
+
+    def find_by_run_id(self, run_id: str) -> Any:
+        """Đọc trạng thái hiện tại của một run."""
+        dataframe = self._read()
+        if dataframe is None:
+            return None
+        rows = dataframe.filter(col("run_id") == run_id).limit(1).collect()
+        return rows[0] if rows else None
+
+    def find_by_source_hash(self, source_hash: str) -> Any:
+        """Đọc run gần nhất của một source hash."""
+        if not source_hash:
+            return None
+        dataframe = self._read()
+        if dataframe is None:
+            return None
+        rows = (
+            dataframe.filter(col("source_hash") == source_hash)
+            .orderBy(col("last_updated_at").desc())
+            .limit(1)
+            .collect()
+        )
+        return rows[0] if rows else None
+
+    def assert_batch_identity(self, batch_id: str, source_hash: str) -> None:
+        """Không cho phép reuse batch_id với nội dung file khác."""
+        dataframe = self._read()
+        if dataframe is None:
+            return
+        conflicts = (
+            dataframe.filter(
+                (col("batch_id") == batch_id)
+                & col("source_hash").isNotNull()
+                & (col("source_hash") != source_hash)
             )
-            return success_count > 0
-        except Exception as e:
-            LOGGER.debug("Lỗi khi đọc BatchRegistry Delta table: %s", e)
-            return False
+            .limit(1)
+            .collect()
+        )
+        if conflicts:
+            raise BatchConflictError(
+                f"batch_id={batch_id} đã tồn tại với source_hash khác; không được ghi đè nội dung batch."
+            )
 
+    def is_batch_processed(self, source_hash: str) -> bool:
+        """True khi hash đã đạt trạng thái SUCCESS hoặc PUBLISHED."""
+        if not source_hash or source_hash in {
+            "hash_unspecified",
+            "hash_unavailable",
+            "default_stream_source",
+        }:
+            return False
+        row = self.find_by_source_hash(source_hash)
+        return row is not None and row["status"] in {"SUCCESS", "PUBLISHED"}
+
+    def start_run(
+        self,
+        *,
+        run_id: str,
+        batch_id: str,
+        source_uri: str,
+        source_hash: str,
+        raw_rows: int = 0,
+        source_system: str = "ecommerce_csv",
+        pipeline_version: str = "1.0.0",
+        contract_version: str = "1.0.0",
+        source_size_bytes: int = 0,
+    ) -> None:
+        """Tạo hoặc reset đúng một run ở trạng thái PROCESSING."""
+        self.assert_batch_identity(batch_id, source_hash)
+        existing = self.find_by_run_id(run_id)
+        if existing is not None and existing["status"] not in {"FAILED", "PROCESSING"}:
+            raise BatchConflictError(
+                f"run_id={run_id} đã ở trạng thái {existing['status']}, không thể start lại."
+            )
+
+        self._merge(
+            {
+                "run_id": run_id,
+                "batch_id": batch_id,
+                "source_system": source_system,
+                "source_uri": source_uri,
+                "source_hash": source_hash,
+                "source_size_bytes": int(source_size_bytes),
+                "status": "PROCESSING",
+                "started_at": self._now(),
+                "completed_at": None,
+                "raw_rows": int(raw_rows),
+                "exact_duplicate_rows": None,
+                "rejected_rows": None,
+                "sequence_conflict_rows": None,
+                "valid_event_rows": None,
+                "superseded_rows": None,
+                "inserted_rows": None,
+                "updated_rows": None,
+                "unchanged_rows": None,
+                "stale_rows": None,
+                "deleted_rows": None,
+                "orphan_delete_rows": None,
+                "gold_run_id": None,
+                "published_version": None,
+                "error_code": None,
+                "error_message": None,
+                "pipeline_version": pipeline_version,
+                "contract_version": contract_version,
+            }
+        )
+        LOGGER.info("Registry: run=%s status=PROCESSING batch=%s", run_id, batch_id)
+
+    def update_metrics(self, run_id: str, **metrics: int) -> None:
+        """Cập nhật các metric đã biết, không thay đổi các metric khác."""
+        unknown = set(metrics) - self.METRIC_COLUMNS
+        if unknown:
+            raise ValueError(f"Metric registry không được hỗ trợ: {sorted(unknown)}")
+        self._merge({"run_id": run_id, **{key: int(value) for key, value in metrics.items()}})
+
+    def update_status(self, run_id: str, status: str, **fields: Any) -> None:
+        """Cập nhật trạng thái và các field liên quan của run."""
+        allowed = {field.name for field in self.REGISTRY_SCHEMA.fields}
+        unknown = set(fields) - allowed
+        if unknown:
+            raise ValueError(f"Field registry không được hỗ trợ: {sorted(unknown)}")
+        self._merge({"run_id": run_id, "status": status, **fields})
+
+    def mark_validated(self, run_id: str) -> None:
+        self.update_status(run_id, "VALIDATED")
+
+    def mark_silver_merged(self, run_id: str) -> None:
+        self.update_status(run_id, "SILVER_MERGED")
+
+    def mark_reconciled(self, run_id: str) -> None:
+        self.update_status(run_id, "RECONCILED")
+
+    def mark_published(
+        self,
+        run_id: str,
+        *,
+        gold_run_id: str,
+        published_version: str,
+    ) -> None:
+        self.update_status(
+            run_id,
+            "PUBLISHED",
+            gold_run_id=gold_run_id,
+            published_version=published_version,
+            completed_at=self._now(),
+        )
+
+    def mark_failed(
+        self,
+        run_id: str,
+        error: Exception | str,
+        *,
+        error_code: str = "PIPELINE_FAILED",
+    ) -> None:
+        """Đánh dấu FAILED và để lỗi registry tự nổi lên nếu ghi thất bại."""
+        message = str(error)[:4000]
+        self.update_status(
+            run_id,
+            "FAILED",
+            error_code=error_code,
+            error_message=message,
+            completed_at=self._now(),
+        )
+        LOGGER.error("Registry: run=%s status=FAILED code=%s", run_id, error_code)
+
+    # API tương thích ngược với pipeline/CLI hiện tại.
     def register_batch_start(
         self,
         run_id: str,
@@ -75,45 +324,17 @@ class BatchRegistry:
         contract_version: str = "1.0.0",
         source_size: int = 0,
     ) -> None:
-        """Ghi nhận khởi đầu một lượt xử lý batch (Trạng thái: PROCESSING)."""
-        try:
-            row_data = [
-                (
-                    run_id,
-                    batch_id,
-                    source_system,
-                    source_uri,
-                    source_hash,
-                    int(source_size),
-                    int(row_count),
-                    "PROCESSING",
-                    datetime.now().isoformat(),
-                    None,
-                    pipeline_version,
-                    contract_version,
-                    None,
-                )
-            ]
-            schema = [
-                "run_id",
-                "batch_id",
-                "source_system",
-                "source_uri",
-                "source_hash",
-                "source_size",
-                "row_count",
-                "status",
-                "started_at",
-                "completed_at",
-                "pipeline_version",
-                "contract_version",
-                "error_message",
-            ]
-            df = self.spark.createDataFrame(row_data, schema).withColumn("registered_at", current_timestamp())
-            df.write.format("delta").mode("append").save(self.registry_path)
-            LOGGER.info("BatchRegistry: Đã đăng ký BẮT ĐẦU xử lý Batch %s (Hash: %s).", batch_id, source_hash[:10])
-        except Exception as e:
-            LOGGER.debug("Không thể ghi nhận register_batch_start vào Delta (local test mode): %s", e)
+        self.start_run(
+            run_id=run_id,
+            batch_id=batch_id,
+            source_uri=source_uri,
+            source_hash=source_hash,
+            raw_rows=row_count,
+            source_system=source_system,
+            pipeline_version=pipeline_version,
+            contract_version=contract_version,
+            source_size_bytes=source_size,
+        )
 
     def mark_batch_success(
         self,
@@ -122,77 +343,32 @@ class BatchRegistry:
         row_count: int | None = None,
         certified_gold_version: int | None = None,
     ) -> None:
-        """Cập nhật trạng thái Batch thành SUCCESS khi toàn bộ pipeline và đối soát đã đạt."""
-        try:
-            row_data = [
-                (
-                    run_id,
-                    batch_id,
-                    "SUCCESS",
-                    int(row_count or 0),
-                    int(certified_gold_version or 1),
-                    datetime.now().isoformat(),
-                    None,
-                )
-            ]
-            schema = [
-                "run_id",
-                "batch_id",
-                "status",
-                "row_count",
-                "certified_gold_version",
-                "completed_at",
-                "error_message",
-            ]
-            df = self.spark.createDataFrame(row_data, schema).withColumn("registered_at", current_timestamp())
-            df.write.format("delta").mode("append").save(self.registry_path)
-            LOGGER.info("BatchRegistry: Đã xác nhận THÀNH CÔNG Batch %s (Run: %s).", batch_id, run_id)
-        except Exception as e:
-            LOGGER.debug("Không thể ghi nhận mark_batch_success vào Delta: %s", e)
+        """API cũ: SUCCESS vẫn được ghi qua cùng một dòng registry."""
+        current = self.find_by_run_id(run_id)
+        if current is None:
+            raise ValueError(f"Không tìm thấy run_id={run_id} để mark success")
+        if current["batch_id"] != batch_id:
+            raise BatchConflictError(f"run_id={run_id} không thuộc batch_id={batch_id}")
+        fields: dict[str, Any] = {"completed_at": self._now()}
+        if row_count is not None:
+            fields["raw_rows"] = int(row_count)
+        if certified_gold_version is not None:
+            fields["published_version"] = str(certified_gold_version)
+        self.update_status(run_id, "SUCCESS", **fields)
 
-    def mark_batch_failed(
-        self,
-        run_id: str,
-        batch_id: str,
-        error_message: str,
-    ) -> None:
-        """Ghi nhận Batch thất bại (Trạng thái: FAILED) kèm nguyên nhân cụ thể."""
-        try:
-            row_data = [
-                (
-                    run_id,
-                    batch_id,
-                    "FAILED",
-                    0,
-                    None,
-                    datetime.now().isoformat(),
-                    str(error_message)[:1000],
-                )
-            ]
-            schema = [
-                "run_id",
-                "batch_id",
-                "status",
-                "row_count",
-                "certified_gold_version",
-                "completed_at",
-                "error_message",
-            ]
-            df = self.spark.createDataFrame(row_data, schema).withColumn("registered_at", current_timestamp())
-            df.write.format("delta").mode("append").save(self.registry_path)
-            LOGGER.warning("BatchRegistry: Đã ghi nhận THẤT BẠI Batch %s: %s", batch_id, error_message)
-        except Exception as e:
-            LOGGER.debug("Không thể ghi nhận mark_batch_failed vào Delta: %s", e)
+    def mark_batch_failed(self, run_id: str, batch_id: str, error_message: str) -> None:
+        """API cũ cho caller hiện hữu; vẫn cập nhật đúng một dòng theo ``run_id``."""
+        current = self.find_by_run_id(run_id)
+        if current is None:
+            raise ValueError(f"Không tìm thấy run_id={run_id} để mark failed")
+        if current["batch_id"] != batch_id:
+            raise BatchConflictError(f"run_id={run_id} không thuộc batch_id={batch_id}")
+        self.mark_failed(run_id, error_message)
 
     def is_latest_run_certified(self) -> bool:
-        """Kiểm tra lần chạy gần nhất có được chứng nhận (SUCCESS) hay không."""
-        if not self._delta_exists():
+        """Kiểm tra run mới nhất đã được công bố thành công hay chưa."""
+        dataframe = self._read()
+        if dataframe is None:
             return False
-        try:
-            df = self.spark.read.format("delta").load(self.registry_path)
-            if "status" not in df.columns:
-                return False
-            latest_row = df.orderBy(col("registered_at").desc()).first()
-            return latest_row is not None and latest_row["status"] == "SUCCESS"
-        except Exception:
-            return False
+        latest = dataframe.orderBy(col("last_updated_at").desc()).limit(1).collect()
+        return bool(latest and latest[0]["status"] in {"SUCCESS", "PUBLISHED"})

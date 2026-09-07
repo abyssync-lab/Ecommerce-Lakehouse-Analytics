@@ -1,0 +1,119 @@
+version: "2.0.0"
+dataset: "ecommerce_order_change"
+grain: "one change event for one order line"
+description: "Contract v2 cho incremental order-change events từ GlobalCart OMS"
+
+merge_keys:
+  - "Order_ID"
+  - "Order_Line_ID"
+sequence_column: "Source_Updated_At"
+operation_column: "Operation"
+
+columns:
+  Order_ID:
+    type: "string"
+    nullable: false
+    description: "Business order identifier"
+  Order_Line_ID:
+    type: "string"
+    nullable: false
+    description: "Stable line identifier supplied by OMS; never derive from mutable values"
+  Product_ID:
+    type: "string"
+    nullable: true
+    description: "Product identifier; required for UPSERT and optional for DELETE"
+  Source_Updated_At:
+    type: "timestamp"
+    nullable: false
+    description: "Source-system event time used for stale-event protection"
+  Operation:
+    type: "string"
+    nullable: false
+    allowed_values:
+      - "UPSERT"
+      - "DELETE"
+    description: "Change operation from OMS"
+  Order_Date:
+    type: "date"
+    nullable: true
+    format: "yyyy-MM-dd"
+    description: "Order placement date; required for UPSERT"
+  Customer_ID:
+    type: "string"
+    nullable: true
+    description: "Customer natural key; required for UPSERT"
+  Customer_Gender:
+    type: "string"
+    nullable: true
+  Customer_Segment:
+    type: "string"
+    nullable: true
+  Quantity:
+    type: "integer"
+    nullable: true
+    min: 1
+    description: "Required and positive for UPSERT"
+  Unit_Price:
+    type: "decimal"
+    nullable: true
+    min: 0
+    description: "Required and non-negative for UPSERT"
+  Discount:
+    type: "decimal"
+    nullable: true
+    min: 0
+    max: 1
+  Cost:
+    type: "decimal"
+    nullable: true
+    min: 0
+  Order_Status:
+    type: "string"
+    nullable: true
+    allowed_values:
+      - "Processing"
+      - "Shipped"
+      - "Delivered"
+      - "Returned"
+      - "Cancelled"
+  Payment_Method:
+    type: "string"
+    nullable: true
+  Shipping_Method:
+    type: "string"
+    nullable: true
+  Region:
+    type: "string"
+    nullable: true
+  Country:
+    type: "string"
+    nullable: true
+
+metadata_columns:
+  _run_id:
+    type: "string"
+  _batch_id:
+    type: "string"
+  _source_system:
+    type: "string"
+  _source_uri:
+    type: "string"
+  _source_hash:
+    type: "string"
+  _source_row_number:
+    type: "long"
+  _ingested_at:
+    type: "timestamp"
+  _record_hash:
+    type: "string"
+  _contract_version:
+    type: "string"
+  _pipeline_version:
+    type: "string"
+
+business_keys:
+  order_key:
+    - "Order_ID"
+  order_line_key:
+    - "Order_ID"
+    - "Order_Line_ID"

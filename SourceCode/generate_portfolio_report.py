@@ -8,6 +8,8 @@ from pathlib import Path
 
 import pandas as pd
 from data_quality import assert_quality, validate_business_values
+from lakehouse.pipeline import create_spark_session
+from lakehouse.publication import get_current_publication
 from portfolio_metrics import (
     aggregate_performance,
     calculate_abc_product_analysis,
@@ -42,7 +44,7 @@ def dataframe_to_markdown(dataframe: pd.DataFrame) -> str:
     return "\n".join([header_line, separator, *body])
 
 
-def build_report(dataframe: pd.DataFrame) -> str:
+def build_report(dataframe: pd.DataFrame, source_label: str = "certified Gold serving") -> str:
     """Tạo nội dung Markdown báo cáo Business Insights chỉ từ dữ liệu đã qua Data Quality Gate.
 
     Args:
@@ -83,7 +85,7 @@ def build_report(dataframe: pd.DataFrame) -> str:
     lines = [
         "# GlobalCart Intelligence — Báo Cáo Phân Tích Dữ Liệu Kinh Doanh",
         "",
-        "> 🤖 Báo cáo này được sinh tự động từ `Data/EcommerceSalesDataset.csv` thông qua Data Quality Gate & Analytics Engine.",
+        f"> 🤖 Báo cáo này được sinh tự động từ `{source_label}` thông qua Data Quality Gate & Analytics Engine.",
         "",
         "## 1. Chỉ Số KPI Tổng Quan (Executive Overview)",
         "",
@@ -137,18 +139,41 @@ def build_report(dataframe: pd.DataFrame) -> str:
 
 
 def main() -> None:
-    """Hàm chính điều phối việc đọc file CSV và xuất file Markdown báo cáo."""
+    """Đọc certified Gold mặc định; CSV chỉ là fallback được yêu cầu rõ ràng."""
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8")
 
     parser = argparse.ArgumentParser(description="Tự động sinh báo cáo Business Insights")
+    parser.add_argument(
+        "--source",
+        choices=["published", "csv"],
+        default="published",
+        help="Nguồn báo cáo: certified Gold serving (mặc định) hoặc CSV validation độc lập",
+    )
     parser.add_argument("--input", type=Path, default=Path("Data/EcommerceSalesDataset.csv"))
     parser.add_argument("--output", type=Path, default=Path("docs/BUSINESS_INSIGHTS.md"))
     args = parser.parse_args()
 
-    dataframe = pd.read_csv(args.input)
+    spark = None
+    if args.source == "published":
+        spark = create_spark_session()
+        current_run_id = get_current_publication(spark)
+        if not current_run_id or current_run_id == "__NONE__":
+            spark.stop()
+            raise RuntimeError(
+                "Chưa có certified Gold publication. Hãy chạy pipeline thành công trước "
+                "hoặc dùng --source csv cho validation độc lập."
+            )
+        dataframe = spark.table("serving.gold_sales_enriched").drop("Publication_Run_ID").toPandas()
+        source_label = f"serving.gold_sales_enriched (publication_run_id={current_run_id})"
+    else:
+        dataframe = pd.read_csv(args.input)
+        source_label = str(args.input)
+
     args.output.parent.mkdir(parents=True, exist_ok=True)
-    args.output.write_text(build_report(dataframe), encoding="utf-8")
+    args.output.write_text(build_report(dataframe, source_label=source_label), encoding="utf-8")
+    if spark is not None:
+        spark.stop()
     print(f"✨ Đã khởi tạo thành công báo cáo: {args.output}")
 
 

@@ -1,0 +1,9 @@
+version: "shipping-sla-v1"
+description: "Ngưỡng SLA giao hàng dùng cho fulfillment marts."
+
+default_sla_days: 7
+
+by_shipping_method:
+  Standard: 7
+  Express: 3
+  Same Day: 1

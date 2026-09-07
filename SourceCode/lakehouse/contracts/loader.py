@@ -16,6 +16,9 @@ import yaml
 LOGGER = logging.getLogger(__name__)
 
 DEFAULT_CONTRACT_PATH = Path(__file__).resolve().parents[3] / "contracts" / "ecommerce_order.yaml"
+CHANGE_CONTRACT_PATH = (
+    Path(__file__).resolve().parents[3] / "contracts" / "ecommerce_order_change_v2.yaml"
+)
 
 
 @dataclass(frozen=True)
@@ -43,6 +46,8 @@ class DatasetContract:
     columns: dict[str, ColumnContract]
     metadata_columns: dict[str, ColumnContract] = field(default_factory=dict)
     business_keys: dict[str, list[str]] = field(default_factory=dict)
+    sequence_column: str | None = None
+    operation_column: str | None = None
 
     @property
     def required_columns(self) -> set[str]:
@@ -105,7 +110,9 @@ def load_contract(contract_path: str | Path | None = None) -> DatasetContract:
         return _CACHED_CONTRACT
 
     if not target_path.exists():
-        LOGGER.warning("Không tìm thấy file contract tại %s, sử dụng fallback mặc định.", target_path)
+        LOGGER.warning(
+            "Không tìm thấy file contract tại %s, sử dụng fallback mặc định.", target_path
+        )
         return _create_fallback_contract()
 
     with open(target_path, encoding="utf-8") as f:
@@ -141,11 +148,30 @@ def load_contract(contract_path: str | Path | None = None) -> DatasetContract:
         columns=cols,
         metadata_columns=meta_cols,
         business_keys=data.get("business_keys", {}),
+        sequence_column=data.get("sequence_column"),
+        operation_column=data.get("operation_column"),
     )
 
     if contract_path is None:
         _CACHED_CONTRACT = contract
     return contract
+
+
+def detect_contract_path(columns: set[str] | list[str]) -> Path:
+    """Chọn contract theo shape của file, không đoán theo tên file.
+
+    Event contract v2 có ba cột nhận diện bắt buộc. Các file historical hiện tại
+    không có chúng và tiếp tục đi qua contract bootstrap v1 để giữ backward compatibility.
+    """
+    column_set = set(columns)
+    if {"Order_Line_ID", "Source_Updated_At", "Operation"}.issubset(column_set):
+        return CHANGE_CONTRACT_PATH
+    return DEFAULT_CONTRACT_PATH
+
+
+def load_contract_for_columns(columns: set[str] | list[str]) -> DatasetContract:
+    """Nạp đúng contract cho schema thực tế của một file nguồn."""
+    return load_contract(detect_contract_path(columns))
 
 
 def get_spark_raw_schema(contract: DatasetContract | None = None) -> Any:
@@ -183,12 +209,14 @@ def get_spark_silver_rules(contract: DatasetContract | None = None) -> dict[str,
                 rules[f"{col_name} >= {col_contract.min}"] = col(col_name) >= col_contract.min
 
         if col_contract.max is not None and col_contract.min is not None:
-            rules[f"{col_name} trong [{col_contract.min}, {col_contract.max}]"] = col(col_name).between(
-                col_contract.min, col_contract.max
-            )
+            rules[f"{col_name} trong [{col_contract.min}, {col_contract.max}]"] = col(
+                col_name
+            ).between(col_contract.min, col_contract.max)
 
         if col_contract.allowed_values:
-            rules[f"{col_name} thuộc danh sách hợp lệ"] = col(col_name).isin(col_contract.allowed_values)
+            rules[f"{col_name} thuộc danh sách hợp lệ"] = col(col_name).isin(
+                col_contract.allowed_values
+            )
 
     return rules
 
@@ -223,6 +251,12 @@ def _create_fallback_contract() -> DatasetContract:
         business_keys={
             "order_key": ["Order_ID"],
             "order_line_key": ["Order_ID", "Order_Line_ID"],
-            "fallback_line_fingerprint": ["Order_ID", "Product_Name", "Quantity", "Unit_Price", "Discount"],
+            "fallback_line_fingerprint": [
+                "Order_ID",
+                "Product_Name",
+                "Quantity",
+                "Unit_Price",
+                "Discount",
+            ],
         },
     )

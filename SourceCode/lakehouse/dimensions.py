@@ -18,7 +18,9 @@ from pyspark.sql.functions import (
     row_number,
     sequence,
     to_date,
+    to_timestamp,
     when,
+    xxhash64,
     year,
 )
 from pyspark.sql.functions import max as spark_max
@@ -30,19 +32,15 @@ LOGGER = logging.getLogger(__name__)
 
 
 def add_surrogate_key(dataframe: Any, key_name: str, order_cols: list[str]) -> Any:
-    """Sinh khóa đại diện (Surrogate Key) ổn định (1, 2, 3...) bằng `row_number()`.
+    """Sinh surrogate key tất định từ natural key, không phụ thuộc row order của batch.
 
     Chiến lược khóa (Surrogate Key Strategy):
-    - **Portfolio Deterministic Rebuild Key (Áp dụng tại đây):** Dùng `row_number().over(orderBy(*order_cols))`
-      sắp xếp theo khóa tự nhiên nghiệp vụ thay vì `monotonically_increasing_id()` để bảo đảm tính tái lập
-      (reproducibility) 100% giữa các lần re-run pipeline từ cùng tập dữ liệu.
-    - **Enterprise Production Persistent Key (Khuyến nghị Enterprise DW):** Tra cứu bảng Dimension Delta hiện hữu
-      (Stateful Lookup), tái sử dụng surrogate key đã cấp cho natural key cũ, và chỉ cấp mới `max(key) + sequence`
-      hoặc Hashed Surrogate Key cho các thành viên mới xuất hiện để không bao giờ làm đổi key lịch sử.
+    `row_number()` thay đổi khi một dimension member mới xuất hiện và có thể làm fact
+    cũ trỏ sang key khác. Hash key giữ nguyên khi rebuild/incremental; bảng mapping
+    persistent riêng có thể thay thế sau này nếu cần chống collision tuyệt đối.
     """
-    window_spec = Window.orderBy(*order_cols)
-    return dataframe.withColumn(key_name, row_number().over(window_spec))
-
+    key_expression = xxhash64(*[col(column).cast("string") for column in order_cols])
+    return dataframe.withColumn(key_name, key_expression.cast("long"))
 
 
 def build_dim_product(clean_df: Any) -> Any:
@@ -58,7 +56,12 @@ def build_dim_customer(clean_df: Any, use_scd2: bool = False) -> Any:
         return build_dim_customer_scd2(clean_df)
 
     if "Order_Date" in clean_df.columns:
-        w = Window.partitionBy("Customer_ID").orderBy(col("Order_Date").desc())
+        order_expressions = [col("Order_Date").desc()]
+        if "Source_Updated_At" in clean_df.columns:
+            order_expressions.insert(0, col("Source_Updated_At").desc())
+        if "Order_ID" in clean_df.columns:
+            order_expressions.append(col("Order_ID").desc())
+        w = Window.partitionBy("Customer_ID").orderBy(*order_expressions)
         dim = (
             clean_df.select("Customer_ID", "Customer_Gender", "Customer_Segment", "Order_Date")
             .withColumn("rn", row_number().over(w))
@@ -66,7 +69,9 @@ def build_dim_customer(clean_df: Any, use_scd2: bool = False) -> Any:
             .drop("rn", "Order_Date")
         )
     else:
-        dim = clean_df.select("Customer_ID", "Customer_Gender", "Customer_Segment").dropDuplicates(subset=["Customer_ID"])
+        dim = clean_df.select("Customer_ID", "Customer_Gender", "Customer_Segment").dropDuplicates(
+            subset=["Customer_ID"]
+        )
 
     dim = add_surrogate_key(dim, "CustomerKey", ["Customer_ID"])
     return dim.select("CustomerKey", "Customer_ID", "Customer_Gender", "Customer_Segment")
@@ -79,49 +84,67 @@ def build_dim_customer_scd2(clean_df: Any) -> Any:
     Không dùng groupBy đơn thuần (sẽ làm mất các phiên bản lặp lại), mà phát hiện sự kiện thay đổi
     theo thứ tự thời gian bằng lag(), đánh dấu nhóm trạng thái (change_group), sau đó tính [ValidFrom, ValidTo).
     """
-    # 1. Trích xuất sự kiện giao dịch của khách hàng
-    order_cols = ["Order_Date"]
+    # Với event v2, lịch sử customer phải dùng Source_Updated_At thay vì chỉ dùng
+    # Order_Date. Nhờ vậy hai thay đổi trong cùng một ngày vẫn tạo đúng version.
+    uses_event_timestamp = "Source_Updated_At" in clean_df.columns
+    event_at = (
+        to_timestamp(col("Source_Updated_At"))
+        if uses_event_timestamp
+        else to_date(col("Order_Date"))
+    )
+    end_of_time = (
+        to_timestamp(lit("9999-12-31 23:59:59"))
+        if uses_event_timestamp
+        else to_date(lit("9999-12-31"))
+    )
+
+    event_columns = [
+        "Customer_ID",
+        "Customer_Gender",
+        "Customer_Segment",
+        event_at.alias("_event_at"),
+    ]
     if "Order_ID" in clean_df.columns:
-        order_cols.append("Order_ID")
+        event_columns.append(col("Order_ID").alias("_order_id"))
 
-    cust_events = clean_df.select(
-        "Customer_ID", "Customer_Gender", "Customer_Segment", *order_cols
-    ).dropDuplicates()
-
+    cust_events = clean_df.select(*event_columns).dropDuplicates()
+    order_cols = ["_event_at"]
+    if "_order_id" in cust_events.columns:
+        order_cols.append("_order_id")
     w_order = Window.partitionBy("Customer_ID").orderBy(*order_cols)
 
-    # 2. Phát hiện thay đổi trạng thái thuộc tính (Change Detection)
+    # Null-safe comparison rất quan trọng: hai version có cùng attribute NULL không
+    # được bị coi là hai thay đổi khác nhau.
     prev_gender = lag("Customer_Gender", 1).over(w_order)
     prev_segment = lag("Customer_Segment", 1).over(w_order)
-
-    is_change = (
-        when(prev_gender.isNull() | prev_segment.isNull(), 1)
-        .when((col("Customer_Gender") != prev_gender) | (col("Customer_Segment") != prev_segment), 1)
-        .otherwise(0)
-    )
+    same_gender = col("Customer_Gender").eqNullSafe(prev_gender)
+    same_segment = col("Customer_Segment").eqNullSafe(prev_segment)
+    is_first_event = row_number().over(w_order) == 1
+    is_change = when(is_first_event, 1).when(same_gender & same_segment, 0).otherwise(1)
 
     events_with_change = cust_events.withColumn("is_change", is_change)
 
-    # 3. Gom cụm các khoảng trạng thái liên tục (Island Grouping / Change Group)
+    # Cộng dồn cờ thay đổi để tạo các phiên liên tục A -> B -> A riêng biệt.
     w_cum = (
         Window.partitionBy("Customer_ID")
         .orderBy(*order_cols)
         .rowsBetween(Window.unboundedPreceding, Window.currentRow)
     )
-    events_grouped = events_with_change.withColumn("change_group", spark_sum("is_change").over(w_cum))
+    events_grouped = events_with_change.withColumn(
+        "change_group", spark_sum("is_change").over(w_cum)
+    )
 
-    # 4. Xác định ValidFrom cho từng phiên bản
     state_versions = events_grouped.groupBy(
         "Customer_ID", "change_group", "Customer_Gender", "Customer_Segment"
-    ).agg(spark_min("Order_Date").alias("ValidFrom"))
+    ).agg(spark_min("_event_at").alias("ValidFrom"))
 
-    # 5. Xác định ValidTo và Is_Current theo khoảng nửa mở [ValidFrom, ValidTo)
+    # ValidTo là khoảng nửa mở [ValidFrom, ValidTo), dùng event kế tiếp làm mốc đóng.
     w_scd = Window.partitionBy("Customer_ID").orderBy("ValidFrom")
     scd_df = (
         state_versions.withColumn("NextValidFrom", lead("ValidFrom", 1).over(w_scd))
         .withColumn(
             "ValidTo",
-            when(col("NextValidFrom").isNotNull(), col("NextValidFrom")).otherwise(to_date(lit("9999-12-31"))),
+            when(col("NextValidFrom").isNotNull(), col("NextValidFrom")).otherwise(end_of_time),
         )
         .withColumn("Is_Current", when(col("NextValidFrom").isNull(), 1).otherwise(0))
         .drop("NextValidFrom", "change_group")
@@ -179,7 +202,11 @@ def build_dim_date(spark: Any, clean_df: Any) -> Any:
 
     date_seq_df = spark.createDataFrame(
         [(date_range["min_date"], date_range["max_date"])], ["min_date", "max_date"]
-    ).select(explode(sequence(col("min_date"), col("max_date"), expr("interval 1 day"))).alias("FullDate"))
+    ).select(
+        explode(sequence(col("min_date"), col("max_date"), expr("interval 1 day"))).alias(
+            "FullDate"
+        )
+    )
 
     dim = (
         date_seq_df.withColumn("DateKey", date_format(col("FullDate"), "yyyyMMdd").cast("int"))

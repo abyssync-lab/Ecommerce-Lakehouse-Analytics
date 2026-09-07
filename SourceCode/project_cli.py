@@ -54,6 +54,17 @@ def run_quality_checks() -> int:
         LOGGER.error("Kiểm tra validate_input thất bại với exit code %d", validate_code)
         return validate_code
 
+    # Certified report chỉ có thể sinh sau khi bootstrap đã tạo và publish Gold.
+    # Không đọc report cũ hoặc CSV raw để che khuất lỗi của pipeline chính.
+    LOGGER.info("Chạy bootstrap pipeline để tạo certified Gold...")
+    pipeline_code = run_python(
+        "SparkEcommerceAnalysis.py",
+        ["--input", str(DEFAULT_DATASET)],
+    )
+    if pipeline_code != 0:
+        LOGGER.error("Bootstrap pipeline thất bại với exit code %d", pipeline_code)
+        return pipeline_code
+
     LOGGER.info("Sinh lại báo cáo Business Insights tự động...")
     report_code = run_python("generate_portfolio_report.py")
     if report_code != 0:
@@ -255,4 +266,3 @@ def main(arguments: list[str] | None = None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

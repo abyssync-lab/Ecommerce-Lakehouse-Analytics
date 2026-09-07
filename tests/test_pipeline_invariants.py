@@ -19,40 +19,15 @@ SOURCE_DIR = Path(__file__).resolve().parents[1] / "SourceCode"
 if str(SOURCE_DIR) not in sys.path:
     sys.path.insert(0, str(SOURCE_DIR))
 
-from lakehouse.contracts.loader import load_contract
-
-try:
-    from lakehouse.dimensions import build_all_dimensions
-    from lakehouse.ingestion import calculate_source_hash, enrich_with_ingestion_metadata
-    from lakehouse.marts import build_all_marts, build_fact_sales, build_sales_enriched
-    from lakehouse.pipeline import PipelineCertificationError
-    from lakehouse.reconciliation import run_full_reconciliation
-    from lakehouse.registry import BatchRegistry
-    from lakehouse.silver import clean_and_enrich_silver
-    from pyspark.sql import SparkSession
-    from pyspark.sql.functions import col
-    from pyspark.sql.functions import sum as spark_sum
-
-    HAS_PYSPARK = True
-except ImportError:
-    HAS_PYSPARK = False
-
-
-@pytest.fixture(scope="module")
-def spark_session():
-    """Fixture SparkSession local cho kiểm thử invariants."""
-    if not HAS_PYSPARK:
-        pytest.skip("PySpark chưa được cài đặt.")
-    spark = (
-        SparkSession.builder.master("local[1]")
-        .appName("PipelineInvariantsTest")
-        .config("spark.driver.host", "127.0.0.1")
-        .config("spark.sql.extensions", "io.delta.sql.DeltaSparkSessionExtension")
-        .config("spark.sql.catalog.spark_catalog", "org.apache.spark.sql.delta.catalog.DeltaCatalog")
-        .getOrCreate()
-    )
-    yield spark
-    spark.stop()
+from lakehouse.contracts.loader import load_contract, load_contract_for_columns
+from lakehouse.dimensions import build_all_dimensions
+from lakehouse.ingestion import calculate_source_hash
+from lakehouse.marts import build_all_marts, build_fact_sales, build_sales_enriched
+from lakehouse.reconciliation import run_full_reconciliation
+from lakehouse.registry import BatchConflictError, BatchRegistry
+from lakehouse.silver import clean_and_enrich_silver
+from pyspark.sql.functions import col
+from pyspark.sql.functions import sum as spark_sum
 
 
 def test_contract_yaml_is_runtime_source_of_truth():
@@ -67,6 +42,17 @@ def test_contract_yaml_is_runtime_source_of_truth():
 
     assert data_quality.REQUIRED_COLUMNS == contract.required_columns
     assert data_quality.ALLOWED_ORDER_STATUSES == contract.allowed_order_statuses
+
+
+def test_change_contract_v2_is_selected_for_incremental_event_shape():
+    """Event shape v2 phải được chọn tự động, không dùng nhầm contract bootstrap v1."""
+    contract = load_contract_for_columns(
+        {"Order_ID", "Order_Line_ID", "Source_Updated_At", "Operation"}
+    )
+    assert contract.version == "2.0.0"
+    assert contract.sequence_column == "Source_Updated_At"
+    assert contract.operation_column == "Operation"
+    assert contract.order_line_key_cols == ["Order_ID", "Order_Line_ID"]
 
 
 def test_order_line_key_is_stable_across_micro_batches(spark_session):
@@ -126,6 +112,33 @@ def test_same_source_hash_idempotency_detection(spark_session, tmp_path):
     assert registry.is_batch_processed(sample_hash)
 
 
+def test_registry_uses_one_schema_and_rejects_batch_id_conflict(spark_session, tmp_path):
+    """Một run chỉ có một row lifecycle; reuse batch_id với hash khác phải fail."""
+    registry = BatchRegistry(spark_session, registry_path=(tmp_path / "registry").as_uri())
+    registry.start_run(
+        run_id="run_lifecycle",
+        batch_id="batch_lifecycle",
+        source_uri="orders_a.csv",
+        source_hash="hash_a",
+    )
+    registry.update_metrics("run_lifecycle", raw_rows=10, valid_event_rows=10)
+    registry.mark_failed("run_lifecycle", "quality gate failed", error_code="DQ_FAILED")
+
+    failed = registry.find_by_run_id("run_lifecycle")
+    assert failed["status"] == "FAILED"
+    assert failed["error_code"] == "DQ_FAILED"
+    assert failed["raw_rows"] == 10
+    assert registry._read().count() == 1
+
+    with pytest.raises(BatchConflictError):
+        registry.start_run(
+            run_id="run_retry",
+            batch_id="batch_lifecycle",
+            source_uri="orders_b.csv",
+            source_hash="hash_b",
+        )
+
+
 def test_reconciliation_fails_when_revenue_discrepant(spark_session):
     """Kiểm tra Reconciliation Gate phát hiện và trả về FAIL khi số liệu doanh thu bị lệch."""
     cols = [
@@ -180,6 +193,16 @@ def test_gold_sales_enriched_and_marts_consistency(spark_session):
 
     enriched = build_sales_enriched(fact, dims)
     assert enriched.count() == fact.count()
+    assert "Order_Date" in enriched.columns
+    assert {str(row["Order_Date"]) for row in enriched.select("Order_Date").collect()} == {
+        "2026-08-01",
+        "2026-08-02",
+    }
+
+    # Kiểm tra mart chạy trên semantic base, không quay lại đọc dữ liệu Silver trực tiếp.
+    marts = build_all_marts(enriched)
+    assert "mart_order_summary" in marts
+    assert "mart_rfm_customer_segmentation" in marts
 
     fact_rev = round(float(fact.select(spark_sum("Revenue")).collect()[0][0]), 2)
     enriched_rev = round(float(enriched.select(spark_sum("Revenue")).collect()[0][0]), 2)
@@ -196,8 +219,6 @@ def test_calculate_source_hash_idempotency(tmp_path):
     file1.write_bytes(b"Order_ID,Revenue\nORD-1,100.0\n")
     file2.write_bytes(b"Order_ID,Revenue\nORD-1,100.0\n")
     file3.write_bytes(b"Order_ID,Revenue\nORD-1,200.0\n")
-
-    from lakehouse.ingestion import calculate_source_hash
 
     hash1 = calculate_source_hash(str(file1))
     hash2 = calculate_source_hash(str(file2))

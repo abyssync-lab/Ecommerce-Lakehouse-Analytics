@@ -84,6 +84,8 @@ class Settings:
     run_delta_demo: bool = _env_bool("ECOMMERCE_RUN_DELTA_DEMO", False)
     wait_before_exit: bool = _env_bool("ECOMMERCE_WAIT_BEFORE_EXIT", False)
     use_scd2: bool = _env_bool("ECOMMERCE_USE_SCD2", False)
+    # Batch vượt quá tỷ lệ reject này phải FAILED để tránh publish dữ liệu thiếu.
+    max_reject_rate: float = float(os.getenv("ECOMMERCE_MAX_REJECT_RATE", "0.05"))
 
     # Spark Driver Network Configs
     spark_driver_host: str | None = os.getenv("SPARK_DRIVER_HOST") or os.getenv("SPARK_LOCAL_IP")
@@ -148,4 +150,3 @@ class PipelineConfig:
 
 
 SETTINGS = Settings()
-

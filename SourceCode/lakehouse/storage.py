@@ -89,10 +89,10 @@ def check_schema_enforcement(spark: Any, test_path: str | None = None) -> None:
     target_path = resolve_path(test_path or SETTINGS.temp_test_delta)
 
     # 1. Tạo bảng mẫu hợp lệ ban đầu (Revenue là kiểu Double)
-    base_df = spark.createDataFrame(
-        [("ORDER_BASE_001", 150.0)], ["Order_ID", "Revenue"]
+    base_df = spark.createDataFrame([("ORDER_BASE_001", 150.0)], ["Order_ID", "Revenue"])
+    base_df.write.format("delta").mode("overwrite").option("overwriteSchema", "true").save(
+        target_path
     )
-    base_df.write.format("delta").mode("overwrite").option("overwriteSchema", "true").save(target_path)
 
     # 2. Thử nghiệm append dữ liệu với kiểu dữ liệu xung đột (Revenue là String 'SAI_SCHEMA')
     wrong_schema_df = spark.createDataFrame(
@@ -114,10 +114,12 @@ def check_versioning_and_time_travel(spark: Any, clean_df: Any) -> None:
     clean_df.limit(10).write.format("delta").mode("append").save(resolve_path(version_path))
 
     version_0_df = (
-        spark.read.format("delta")
-        .option("versionAsOf", 0)
-        .load(resolve_path(version_path))
+        spark.read.format("delta").option("versionAsOf", 0).load(resolve_path(version_path))
     )
     latest_df = spark.read.format("delta").load(resolve_path(version_path))
 
-    LOGGER.info("Số dòng version 0: %d | Số dòng version mới nhất: %d", version_0_df.count(), latest_df.count())
+    LOGGER.info(
+        "Số dòng version 0: %d | Số dòng version mới nhất: %d",
+        version_0_df.count(),
+        latest_df.count(),
+    )

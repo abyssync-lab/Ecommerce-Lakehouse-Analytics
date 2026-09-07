@@ -8,8 +8,10 @@ from typing import Any
 from pyspark.sql.functions import (
     array,
     array_remove,
+    coalesce,
     col,
     concat_ws,
+    countDistinct,
     current_timestamp,
     lit,
     month,
@@ -18,6 +20,8 @@ from pyspark.sql.functions import (
     size,
     substring,
     to_date,
+    to_timestamp,
+    trim,
     when,
     year,
 )
@@ -42,7 +46,9 @@ def record_pipeline_quality(
     try:
         from config import SETTINGS
 
-        target_path = SETTINGS.get_storage_path(f"{SETTINGS.gold_monitoring_base}/pipeline_quality_delta")
+        target_path = SETTINGS.get_storage_path(
+            f"{SETTINGS.gold_monitoring_base}/pipeline_quality_delta"
+        )
         reject_rate = (rejected_count / raw_count * 100) if raw_count > 0 else 0.0
         row_data = [
             (
@@ -66,14 +72,16 @@ def record_pipeline_quality(
             "reject_rate_percent",
             "status",
         ]
-        quality_df = (
-            spark.createDataFrame(row_data, schema)
-            .withColumn("recorded_at", current_timestamp())
+        quality_df = spark.createDataFrame(row_data, schema).withColumn(
+            "recorded_at", current_timestamp()
         )
         quality_df.write.format("delta").mode("append").save(target_path)
         LOGGER.info("Đã lưu trữ Data Quality Metrics vào %s", target_path)
-    except Exception as e:
-        LOGGER.debug("Không thể ghi nhận pipeline_quality Delta table (có thể đang chạy unit test local): %s", e)
+    except Exception:
+        # Quality metrics thuộc control/observability plane. Nếu ghi thất bại mà vẫn
+        # cho pipeline PASS thì operator không thể biết accounting của batch bị mất.
+        LOGGER.exception("Không thể ghi pipeline_quality Delta table")
+        raise
 
 
 def validate_silver_data(
@@ -99,8 +107,15 @@ def validate_silver_data(
     rules.setdefault("Shipping_Days >= 0", col("Shipping_Days") >= 0)
 
     failed = []
+    # DELETE chỉ mang khóa + sequence metadata; không áp dụng các rule tài chính
+    # của UPSERT lên những event này.
+    validation_df = (
+        clean_df.filter(col("Operation") != "DELETE")
+        if "Operation" in clean_df.columns
+        else clean_df
+    )
     for rule_name, condition in rules.items():
-        invalid_count = clean_df.filter(~condition | condition.isNull()).count()
+        invalid_count = validation_df.filter(~condition | condition.isNull()).count()
         LOGGER.info("Kiểm tra Silver Data Contract %-28s | lỗi: %d dòng", rule_name, invalid_count)
         if invalid_count > 0:
             failed.append(f"{rule_name}: {invalid_count} dòng")
@@ -126,6 +141,7 @@ def clean_and_enrich_silver(
     quarantine_path: str | None = None,
     run_id: str | None = None,
     batch_id: str | None = None,
+    allow_line_id_fallback: bool = True,
 ) -> Any:
     """Làm sạch, ép kiểu và tính toán các chỉ số bổ sung cho tầng Silver.
 
@@ -134,6 +150,8 @@ def clean_and_enrich_silver(
         quarantine_path: Đường dẫn tùy chọn để lưu trữ các bản ghi bị loại (Quarantine Table).
         run_id: Mã định danh lần chạy pipeline phục vụ monitoring.
         batch_id: Mã định danh batch nạp.
+        allow_line_id_fallback: Chỉ bật cho historical bootstrap; incremental phải nhận
+            Order_Line_ID thật từ upstream.
 
     Returns:
         Spark DataFrame sạch đã vượt qua Data Quality Gate.
@@ -146,6 +164,101 @@ def clean_and_enrich_silver(
     dedup_df = raw_df.dropDuplicates(subset=biz_cols) if biz_cols else raw_df.dropDuplicates()
     duplicate_count = raw_count - dedup_df.count()
     typed_df = dedup_df
+
+    # Adapter giúp bootstrap historical dataset cũ tương thích với contract event v2.
+    # Incremental mode không được tự sinh line id; caller truyền False để bắt lỗi nguồn.
+    if "Product_Name" not in typed_df.columns and "Product_ID" in typed_df.columns:
+        typed_df = typed_df.withColumn("Product_Name", col("Product_ID"))
+
+    # Event v2 cho incremental bắt buộc có Product_ID ở mức dòng UPSERT.
+    # Đưa cột còn thiếu về NULL để rule quality tạo MISSING_PRODUCT_ID thay vì
+    # để lỗi schema phát nổ muộn hơn trong lúc build dimension.
+    is_incremental_event = not allow_line_id_fallback and {
+        "Order_Line_ID",
+        "Source_Updated_At",
+        "Operation",
+    }.issubset(typed_df.columns)
+    if is_incremental_event and "Product_ID" not in typed_df.columns:
+        typed_df = typed_df.withColumn("Product_ID", lit(None).cast("string"))
+    for optional_text in [
+        "Category",
+        "Sub_Category",
+        "Customer_Gender",
+        "Customer_Segment",
+        "Payment_Method",
+        "Shipping_Method",
+        "Region",
+        "Country",
+    ]:
+        if optional_text not in typed_df.columns:
+            typed_df = typed_df.withColumn(optional_text, lit("Unknown"))
+    for numeric_column, spark_type in [
+        ("Quantity", "int"),
+        ("Unit_Price", "double"),
+        ("Discount", "double"),
+        ("Cost", "double"),
+    ]:
+        if numeric_column not in typed_df.columns:
+            typed_df = typed_df.withColumn(numeric_column, lit(None).cast(spark_type))
+    if "Revenue" not in typed_df.columns:
+        typed_df = typed_df.withColumn(
+            "Revenue",
+            when(
+                col("Quantity").isNotNull()
+                & col("Unit_Price").isNotNull()
+                & col("Discount").isNotNull(),
+                col("Quantity").cast("double")
+                * col("Unit_Price").cast("double")
+                * (lit(1.0) - col("Discount").cast("double")),
+            ).otherwise(lit(None).cast("double")),
+        )
+    if "Profit" not in typed_df.columns:
+        typed_df = typed_df.withColumn(
+            "Profit",
+            when(
+                col("Revenue").isNotNull() & col("Cost").isNotNull(), col("Revenue") - col("Cost")
+            ).otherwise(lit(None).cast("double")),
+        )
+    if "Shipping_Cost" not in typed_df.columns:
+        typed_df = typed_df.withColumn("Shipping_Cost", lit(0.0))
+    if "Shipping_Days" not in typed_df.columns:
+        typed_df = typed_df.withColumn("Shipping_Days", lit(0))
+    if "Order_Date" not in typed_df.columns:
+        typed_df = typed_df.withColumn("Order_Date", lit(None).cast("date"))
+    if "Source_Updated_At" not in typed_df.columns:
+        typed_df = typed_df.withColumn(
+            "Source_Updated_At", to_timestamp(col("Order_Date"), "yyyy-MM-dd")
+        )
+    else:
+        typed_df = typed_df.withColumn("Source_Updated_At", to_timestamp(col("Source_Updated_At")))
+    if "Operation" not in typed_df.columns:
+        typed_df = typed_df.withColumn("Operation", lit("UPSERT"))
+    else:
+        typed_df = typed_df.withColumn("Operation", trim(col("Operation")).alias("Operation"))
+
+    # Cùng line + cùng timestamp nhưng khác record hash là source conflict. Không
+    # được chọn ngẫu nhiên một phiên bản vì sẽ làm mất auditability của event.
+    if "_record_hash" not in typed_df.columns:
+        hash_expr = concat_ws(
+            "\u001f",
+            *[coalesce(col(c).cast("string"), lit("")) for c in biz_cols if c in typed_df.columns],
+        )
+        typed_df = typed_df.withColumn("_record_hash", sha2(hash_expr, 256))
+    if {"Order_ID", "Order_Line_ID", "Source_Updated_At"}.issubset(typed_df.columns):
+        conflict_keys = ["Order_ID", "Order_Line_ID", "Source_Updated_At"]
+        conflict_groups = typed_df.groupBy(*conflict_keys).agg(
+            countDistinct("_record_hash").alias("_sequence_hash_count")
+        )
+        typed_df = (
+            typed_df.join(conflict_groups, on=conflict_keys, how="left")
+            .withColumn(
+                "_sequence_conflict",
+                coalesce(col("_sequence_hash_count") > 1, lit(False)),
+            )
+            .drop("_sequence_hash_count")
+        )
+    else:
+        typed_df = typed_df.withColumn("_sequence_conflict", lit(False))
 
     # Ép kiểu dữ liệu chuẩn
     typed_df = typed_df.withColumn("Order_Date", to_date(col("Order_Date"), "yyyy-MM-dd"))
@@ -209,22 +322,83 @@ def clean_and_enrich_silver(
         & (col("Shipping_Days") >= 0)
     )
 
-    is_valid = null_cond & business_cond
+    # coalesce(..., false) rất quan trọng: trong Spark, filter(NULL) loại dòng khỏi
+    # cả valid lẫn invalid, làm sai công thức raw = valid + rejected + duplicate.
+    if "Order_Line_ID" not in typed_df.columns:
+        line_id_present = lit(False)
+    else:
+        line_id_present = col("Order_Line_ID").isNotNull() & (trim(col("Order_Line_ID")) != "")
+    valid_operation = col("Operation").isin("UPSERT", "DELETE")
+    valid_timestamp = col("Source_Updated_At").isNotNull()
+    valid_upsert = (
+        coalesce(null_cond & business_cond, lit(False)) & valid_operation & valid_timestamp
+    )
+    if "Product_ID" in typed_df.columns:
+        valid_upsert = valid_upsert & col("Product_ID").isNotNull()
+    valid_delete = (
+        col("Order_ID").isNotNull()
+        & line_id_present
+        & valid_timestamp
+        & (col("Operation") == "DELETE")
+    )
+    is_valid = when(col("Operation") == "DELETE", valid_delete).otherwise(valid_upsert)
+    if not allow_line_id_fallback:
+        is_valid = is_valid & line_id_present
+    is_valid = is_valid & ~col("_sequence_conflict")
 
-    clean_df = typed_df.filter(is_valid)
-    rejected_df = typed_df.filter(~is_valid)
+    clean_df = typed_df.filter(coalesce(is_valid, lit(False)))
+    rejected_df = typed_df.filter(~coalesce(is_valid, lit(False)))
 
     rejected_count = rejected_df.count()
     if rejected_count > 0:
         # Thu thập toàn bộ danh sách các lỗi vi phạm (Multi-error tracking thay vì chỉ giữ 1 lỗi)
+        is_upsert = col("Operation") == "UPSERT"
+        order_id_present = col("Order_ID").isNotNull() & (
+            trim(coalesce(col("Order_ID"), lit(""))) != ""
+        )
+        event_time_order_invalid = (
+            col("Order_Date").isNotNull()
+            & col("Source_Updated_At").isNotNull()
+            & (col("Order_Date").cast("timestamp") > col("Source_Updated_At"))
+        )
         all_reasons_arr = array_remove(
             array(
-                when(~null_cond, lit("MISSING_REQUIRED_FIELDS")),
-                when(col("Quantity") <= 0, lit("INVALID_QUANTITY")),
-                when(col("Unit_Price") < 0, lit("INVALID_UNIT_PRICE")),
-                when(~col("Discount").between(0, 1), lit("INVALID_DISCOUNT")),
-                when(col("Revenue") < 0, lit("INVALID_REVENUE")),
-                when(col("Shipping_Days") < 0, lit("INVALID_SHIPPING_DAYS")),
+                when(~coalesce(null_cond, lit(False)), lit("MISSING_REQUIRED_FIELDS")),
+                when(~order_id_present, lit("MISSING_ORDER_ID")),
+                when(~line_id_present, lit("MISSING_LINE_ID"))
+                if not allow_line_id_fallback
+                else lit(None),
+                when(is_upsert & col("Product_ID").isNull(), lit("MISSING_PRODUCT_ID"))
+                if "Product_ID" in typed_df.columns
+                else lit(None),
+                when(
+                    is_upsert & (col("Quantity").isNull() | (col("Quantity") <= 0)),
+                    lit("INVALID_QUANTITY"),
+                ),
+                when(
+                    is_upsert & (col("Unit_Price").isNull() | (col("Unit_Price") < 0)),
+                    lit("INVALID_UNIT_PRICE"),
+                ),
+                when(
+                    is_upsert & (col("Discount").isNull() | ~col("Discount").between(0, 1)),
+                    lit("INVALID_DISCOUNT"),
+                ),
+                when(col("Revenue").isNull() | (col("Revenue") < 0), lit("INVALID_REVENUE")),
+                when(
+                    is_upsert & (col("Shipping_Days").isNull() | (col("Shipping_Days") < 0)),
+                    lit("INVALID_SHIPPING_DAYS"),
+                ),
+                when(
+                    col("Operation").isNull() | ~col("Operation").isin("UPSERT", "DELETE"),
+                    lit("INVALID_OPERATION"),
+                ),
+                when(col("Source_Updated_At").isNull(), lit("INVALID_UPDATED_AT")),
+                when(event_time_order_invalid, lit("INVALID_EVENT_TIME")),
+                when(
+                    is_upsert & (col("Cost").isNull() | (col("Cost") < 0)),
+                    lit("INVALID_COST"),
+                ),
+                when(col("_sequence_conflict"), lit("SEQUENCE_CONFLICT")),
             ),
             None,
         )
@@ -233,34 +407,56 @@ def clean_and_enrich_silver(
             rejected_df.withColumn("rejection_reasons", all_reasons_arr)
             .withColumn(
                 "rejection_reason",
-                when(size(col("rejection_reasons")) > 0, concat_ws("; ", col("rejection_reasons")))
-                .otherwise(lit("DATA_CONTRACT_VIOLATION")),
+                when(
+                    size(col("rejection_reasons")) > 0, concat_ws("; ", col("rejection_reasons"))
+                ).otherwise(lit("DATA_CONTRACT_VIOLATION")),
             )
             .withColumn("rejected_at", current_timestamp())
         )
 
-        LOGGER.warning("Phát hiện %d bản ghi vi phạm Data Quality Gate. Chuyển vào Quarantine.", rejected_count)
+        LOGGER.warning(
+            "Phát hiện %d bản ghi vi phạm Data Quality Gate. Chuyển vào Quarantine.", rejected_count
+        )
         if quarantine_path:
             try:
-                rejected_df.write.format("delta").mode("append").save(quarantine_path)
-                LOGGER.info("Đã lưu %d bản ghi lỗi vào Quarantine table tại: %s", rejected_count, quarantine_path)
-            except Exception as e:
-                LOGGER.warning("Không thể lưu Quarantine table Delta: %s", e)
+                rejected_df.write.format("delta").mode("append").option("mergeSchema", "true").save(
+                    quarantine_path
+                )
+                LOGGER.info(
+                    "Đã lưu %d bản ghi lỗi vào Quarantine table tại: %s",
+                    rejected_count,
+                    quarantine_path,
+                )
+            except Exception:
+                LOGGER.exception("Không thể lưu Quarantine table Delta")
+                raise
 
     # Đặt tên rõ nghĩa cho chỉ số mức đơn: Order_Total_Revenue
     # CẢNH BÁO KIMBALL GRAIN: Giá trị lặp lại ở từng dòng sản phẩm (line-item grain);
     # Tuyệt đối không SUM(Order_Total_Revenue) khi chưa deduplicate Order_ID!
     order_window = Window.partitionBy("Order_ID")
-    clean_df = clean_df.withColumn("Order_Total_Revenue", round(spark_sum("Revenue").over(order_window), 2))
-    clean_df = clean_df.withColumn("Revenue_Per_Order", col("Order_Total_Revenue"))  # Alias tương thích ngược
+    clean_df = clean_df.withColumn(
+        "Order_Total_Revenue", round(spark_sum("Revenue").over(order_window), 2)
+    )
+    clean_df = clean_df.withColumn(
+        "Revenue_Per_Order", col("Order_Total_Revenue")
+    )  # Alias tương thích ngược
     clean_df = clean_df.withColumn("Net_Profit", col("Profit") - col("Shipping_Cost"))
+    clean_df = clean_df.withColumn(
+        "Is_Deleted", when(col("Operation") == "DELETE", lit(True)).otherwise(lit(False))
+    )
+    clean_df = clean_df.drop("_sequence_conflict")
 
     # Định danh duy nhất cho từng dòng sản phẩm trong đơn (Order-Line Grain):
     # - Nếu upstream cung cấp Order_Line_ID (và không rỗng), bảo toàn nguyên bản.
     # - Nếu chưa có (dataset demo), sinh deterministic content fingerprint (Order_ID + Product_Name + Unit_Price + Quantity + Discount)
     #   thay vì row_number() động, ngăn ngừa hoàn toàn nguy cơ đè nhầm bản ghi giữa các micro-batch MERGE.
     contract = load_contract()
-    fp_cols = [col(c).cast("string") for c in contract.fallback_line_fingerprint_cols if c in clean_df.columns]
+    fp_cols = [
+        col(c).cast("string")
+        for c in contract.fallback_line_fingerprint_cols
+        if c in clean_df.columns
+    ]
     if not fp_cols:
         fp_cols = [
             col("Order_ID").cast("string"),
@@ -272,9 +468,11 @@ def clean_and_enrich_silver(
 
     line_fingerprint = substring(sha2(concat_ws("||", *fp_cols), 256), 1, 8)
 
-    if "Order_Line_ID" not in clean_df.columns:
-        clean_df = clean_df.withColumn("Order_Line_ID", concat_ws("-", col("Order_ID"), line_fingerprint))
-    else:
+    if "Order_Line_ID" not in clean_df.columns and allow_line_id_fallback:
+        clean_df = clean_df.withColumn(
+            "Order_Line_ID", concat_ws("-", col("Order_ID"), line_fingerprint)
+        )
+    elif "Order_Line_ID" in clean_df.columns and allow_line_id_fallback:
         clean_df = clean_df.withColumn(
             "Order_Line_ID",
             when(
@@ -320,4 +518,3 @@ def clean_and_enrich_silver(
 
     LOGGER.info("Hoàn tất xử lý Silver Layer với %d dòng bản ghi sạch.", clean_count)
     return clean_df
-

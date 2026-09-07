@@ -5,42 +5,15 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-import pytest
-
 # Add SourceCode to sys.path
 SOURCE_DIR = Path(__file__).resolve().parents[1] / "SourceCode"
 if str(SOURCE_DIR) not in sys.path:
     sys.path.insert(0, str(SOURCE_DIR))
 
-try:
-    from lakehouse.dimensions import (
-        build_all_dimensions,
-        build_dim_customer,
-        build_dim_customer_scd2,
-    )
-    from lakehouse.marts import build_abc_mart, build_fact_sales, build_rfm_mart
-    from lakehouse.silver import clean_and_enrich_silver
-    from pyspark.sql import SparkSession
-    from pyspark.sql.functions import col
-
-    HAS_PYSPARK = True
-except ImportError:
-    HAS_PYSPARK = False
-
-
-@pytest.fixture(scope="module")
-def spark_session():
-    """Fixture khởi tạo SparkSession local cho unit testing."""
-    if not HAS_PYSPARK:
-        pytest.skip("PySpark chưa được cài đặt.")
-    spark = (
-        SparkSession.builder.master("local[1]")
-        .appName("LakehouseUnitTest")
-        .config("spark.driver.host", "127.0.0.1")
-        .getOrCreate()
-    )
-    yield spark
-    spark.stop()
+from lakehouse.dimensions import build_all_dimensions, build_dim_customer, build_dim_customer_scd2
+from lakehouse.marts import build_abc_mart, build_fact_sales, build_rfm_mart
+from lakehouse.silver import clean_and_enrich_silver
+from pyspark.sql.functions import col
 
 
 def test_marts_when_import_and_rfm_abc(spark_session):
@@ -209,4 +182,3 @@ def test_scd2_only_one_current_record_per_customer(spark_session):
 
     assert c001_current == 1
     assert c002_current == 1
-

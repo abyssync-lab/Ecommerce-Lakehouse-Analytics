@@ -1,0 +1,26 @@
+version: "revenue-policy-v1"
+dataset: "ecommerce_order_change"
+description: "Chính sách KPI dùng chung cho Gold marts và báo cáo certified."
+
+recognized_revenue:
+  included_statuses:
+    - "Delivered"
+
+return_rate:
+  numerator_status:
+    - "Returned"
+  denominator_status:
+    - "Delivered"
+    - "Returned"
+
+rfm:
+  included_statuses:
+    - "Delivered"
+
+abc:
+  included_statuses:
+    - "Delivered"
+
+profit_margin:
+  numerator: "SUM(Gross_Profit)"
+  denominator: "SUM(Net_Line_Amount)"

@@ -1,10 +1,13 @@
-"""Module xây dựng FactSales và 12 Data Marts tầng Gold trong Data Lakehouse."""
+"""Module xây dựng FactSales và các Data Marts tầng Gold trong Data Lakehouse."""
 
 from __future__ import annotations
 
 import logging
+from functools import lru_cache
+from pathlib import Path
 from typing import Any
 
+import yaml
 from analytics_rules import (
     ABC_CLASS_A,
     ABC_CLASS_B,
@@ -24,7 +27,29 @@ from pyspark.sql.window import Window
 from .dimensions import add_surrogate_key
 
 LOGGER = logging.getLogger(__name__)
+BUSINESS_METRICS_PATH = Path(__file__).resolve().parents[2] / "contracts" / "business_metrics.yaml"
 
+
+@lru_cache(maxsize=1)
+def _load_business_policy() -> dict[str, list[str]]:
+    """Đọc status policy từ contract thay vì hard-code trong từng mart."""
+    if not BUSINESS_METRICS_PATH.exists():
+        raise FileNotFoundError(f"Thiếu business metric contract: {BUSINESS_METRICS_PATH}")
+
+    data = yaml.safe_load(BUSINESS_METRICS_PATH.read_text(encoding="utf-8")) or {}
+    policy: dict[str, list[str]] = {}
+    for metric_name in ("rfm", "abc"):
+        statuses = data.get(metric_name, {}).get("included_statuses", ["Delivered"])
+        if not statuses:
+            raise ValueError(f"Business policy {metric_name} không có included_statuses")
+        policy[metric_name] = [str(status) for status in statuses]
+    return policy
+
+
+def _filter_policy_rows(clean_df: Any, metric_name: str) -> Any:
+    """Lọc đúng các trạng thái được phép của một metric Gold."""
+    statuses = _load_business_policy()[metric_name]
+    return clean_df.filter(col("Order_Status").isin(statuses))
 
 
 def build_fact_sales(
@@ -36,16 +61,21 @@ def build_fact_sales(
 
     fact = clean_df.withColumn("DateKey", date_format(col("Order_Date"), "yyyyMMdd").cast("int"))
 
-    fact = fact.join(dimensions["dim_product"], on=["Product_Name", "Category", "Sub_Category"], how="left")
-    
+    fact = fact.join(
+        dimensions["dim_product"], on=["Product_Name", "Category", "Sub_Category"], how="left"
+    )
+
     dim_cust = dimensions["dim_customer"]
     if "ValidFrom" in dim_cust.columns and "ValidTo" in dim_cust.columns:
         # SCD Type 2 Temporal Join
+        fact_event_time = (
+            col("Source_Updated_At") if "Source_Updated_At" in fact.columns else col("Order_Date")
+        )
         fact = fact.join(
             dim_cust,
             (fact["Customer_ID"] == dim_cust["Customer_ID"])
-            & (fact["Order_Date"] >= dim_cust["ValidFrom"])
-            & (fact["Order_Date"] < dim_cust["ValidTo"]),
+            & (fact_event_time >= dim_cust["ValidFrom"])
+            & (fact_event_time < dim_cust["ValidTo"]),
             how="left",
         ).drop(dim_cust["Customer_ID"])
     else:
@@ -53,8 +83,14 @@ def build_fact_sales(
         fact = fact.join(dim_cust, on=["Customer_ID"], how="left")
     fact = fact.join(dimensions["dim_location"], on=["Region", "Country"], how="left")
     fact = fact.join(dimensions["dim_payment"], on=["Payment_Method"], how="left")
-    fact = fact.join(dimensions["dim_shipping"], on=["Shipping_Method", "Delivery_Level"], how="left")
-    fact = fact.join(dimensions["dim_order_status"], on=["Order_Status", "Is_Returned", "Is_Cancelled"], how="left")
+    fact = fact.join(
+        dimensions["dim_shipping"], on=["Shipping_Method", "Delivery_Level"], how="left"
+    )
+    fact = fact.join(
+        dimensions["dim_order_status"],
+        on=["Order_Status", "Is_Returned", "Is_Cancelled"],
+        how="left",
+    )
 
     order_cols = ["Order_ID"]
     if "Order_Line_ID" in fact.columns:
@@ -70,24 +106,26 @@ def build_fact_sales(
     fact_cols = ["SalesKey", "Order_ID"]
     if "Order_Line_ID" in fact.columns:
         fact_cols.append("Order_Line_ID")
-    fact_cols.extend([
-        "DateKey",
-        "CustomerKey",
-        "LocationKey",
-        "ProductKey",
-        "ShippingKey",
-        "PaymentKey",
-        "StatusKey",
-        "Unit_Price",
-        "Quantity",
-        "Discount",
-        "Revenue",
-        "Cost",
-        "Profit",
-        "Profit_Margin_Percent",
-        "Shipping_Cost",
-        "Shipping_Days",
-    ])
+    fact_cols.extend(
+        [
+            "DateKey",
+            "CustomerKey",
+            "LocationKey",
+            "ProductKey",
+            "ShippingKey",
+            "PaymentKey",
+            "StatusKey",
+            "Unit_Price",
+            "Quantity",
+            "Discount",
+            "Revenue",
+            "Cost",
+            "Profit",
+            "Profit_Margin_Percent",
+            "Shipping_Cost",
+            "Shipping_Days",
+        ]
+    )
 
     fact_sales = fact.select(*fact_cols)
 
@@ -120,14 +158,22 @@ def aggregate_sales(
 
 
 def build_rfm_mart(clean_df: Any, analysis_date: str | None = None) -> Any:
-    """Xây dựng Data Mart phân hạng RFM bằng PySpark với quy tắc chuẩn hóa `analytics_rules.py`."""
+    """Xây dựng RFM từ các đơn Delivered theo business policy v1."""
+    delivered_df = _filter_policy_rows(clean_df, "rfm")
+    if delivered_df.limit(1).count() == 0:
+        return clean_df.sparkSession.createDataFrame(
+            [],
+            "Customer_ID string, Last_Purchase date, Frequency long, "
+            "Monetary double, Recency int, RFM_Segment string, Rule_Version string",
+        )
+
     if analysis_date is not None:
         max_date_val = analysis_date
     else:
-        max_date_val = clean_df.select(spark_max("Order_Date")).collect()[0][0]
+        max_date_val = delivered_df.select(spark_max("Order_Date")).collect()[0][0]
 
     rfm_base = (
-        clean_df.groupBy("Customer_ID")
+        delivered_df.groupBy("Customer_ID")
         .agg(
             spark_max("Order_Date").alias("Last_Purchase"),
             countDistinct("Order_ID").alias("Frequency"),
@@ -136,30 +182,42 @@ def build_rfm_mart(clean_df: Any, analysis_date: str | None = None) -> Any:
         .withColumn("Recency", datediff(lit(max_date_val), col("Last_Purchase")))
     )
 
-    rfm_mart = rfm_base.withColumn(
-        "RFM_Segment",
-        when((col("Recency") <= 30) & (col("Frequency") >= 3), RFM_CHAMPIONS)
-        .when(col("Frequency") >= 3, RFM_LOYAL)
-        .when(col("Recency") > 90, RFM_AT_RISK)
-        .otherwise(RFM_CASUAL),
-    ).withColumn("Rule_Version", lit(RFM_RULE_VERSION)).orderBy(col("Monetary").desc())
+    rfm_mart = (
+        rfm_base.withColumn(
+            "RFM_Segment",
+            when((col("Recency") <= 30) & (col("Frequency") >= 3), RFM_CHAMPIONS)
+            .when(col("Frequency") >= 3, RFM_LOYAL)
+            .when(col("Recency") > 90, RFM_AT_RISK)
+            .otherwise(RFM_CASUAL),
+        )
+        .withColumn("Rule_Version", lit(RFM_RULE_VERSION))
+        .orderBy(col("Monetary").desc())
+    )
 
     return rfm_mart
 
 
 def build_abc_mart(clean_df: Any) -> Any:
-    """Xây dựng Data Mart Pareto ABC bằng PySpark với quy tắc tích lũy trước sản phẩm chuẩn hóa."""
-    total_rev = clean_df.select(spark_sum("Revenue")).collect()[0][0]
+    """Xây dựng Pareto ABC từ Delivered Revenue theo business policy v1."""
+    delivered_df = _filter_policy_rows(clean_df, "abc")
+    total_rev = delivered_df.select(spark_sum("Revenue")).collect()[0][0]
     if not total_rev or total_rev <= 0:
-        raise ValueError("Không thể phân tích ABC khi tổng doanh thu <= 0")
+        return clean_df.sparkSession.createDataFrame(
+            [],
+            "Product_Name string, Category string, Total_Quantity long, "
+            "Total_Revenue double, Total_Profit double, Cumulative_Revenue double, "
+            "Cumulative_Before_Percent double, Cum_Percent double, ABC_Class string, "
+            "Rule_Version string",
+        )
 
-    prod_base = clean_df.groupBy("Product_Name", "Category").agg(
+    prod_base = delivered_df.groupBy("Product_Name", "Category").agg(
         spark_sum("Quantity").alias("Total_Quantity"),
         round(spark_sum("Revenue"), 2).alias("Total_Revenue"),
         round(spark_sum("Profit"), 2).alias("Total_Profit"),
     )
 
-    window_spec = Window.orderBy(col("Total_Revenue").desc())
+    # Thêm Product_Name để thứ tự phân loại ổn định khi hai sản phẩm cùng doanh thu.
+    window_spec = Window.orderBy(col("Total_Revenue").desc(), col("Product_Name").asc())
 
     abc_mart = (
         prod_base.withColumn("Cumulative_Revenue", spark_sum("Total_Revenue").over(window_spec))
@@ -213,7 +271,11 @@ def build_sales_enriched(fact_sales: Any, dimensions: dict[str, Any]) -> Any:
 
     dim_customer = dimensions.get("dim_customer")
     if dim_customer is not None and "CustomerKey" in enriched.columns:
-        cust_cols = [c for c in dim_customer.columns if c in ["CustomerKey", "Customer_ID", "Customer_Gender", "Customer_Segment"]]
+        cust_cols = [
+            c
+            for c in dim_customer.columns
+            if c in ["CustomerKey", "Customer_ID", "Customer_Gender", "Customer_Segment"]
+        ]
         enriched = enriched.join(dim_customer.select(*cust_cols), on="CustomerKey", how="left")
 
     dim_location = dimensions.get("dim_location")
@@ -234,10 +296,25 @@ def build_sales_enriched(fact_sales: Any, dimensions: dict[str, Any]) -> Any:
 
     dim_date = dimensions.get("dim_date")
     if dim_date is not None and "DateKey" in enriched.columns:
-        date_cols = [c for c in dim_date.columns if c in ["DateKey", "Date", "Year", "Month", "Order_Date"]]
+        date_cols = ["DateKey"]
+        if "Year" in dim_date.columns:
+            date_cols.append("Year")
+        if "Month" in dim_date.columns:
+            date_cols.append("Month")
+        if "Quarter" in dim_date.columns:
+            date_cols.append("Quarter")
+
+        # FactSales chỉ giữ DateKey để tránh lặp thuộc tính ngày. Semantic base phải
+        # khôi phục lại ngày nghiệp vụ với tên Order_Date mà toàn bộ mart đang dùng.
+        if "Order_Date" not in enriched.columns:
+            if "FullDate" in dim_date.columns:
+                date_cols.append(dim_date["FullDate"].alias("Order_Date"))
+            elif "Date" in dim_date.columns:
+                date_cols.append(dim_date["Date"].alias("Order_Date"))
+            elif "Order_Date" in dim_date.columns:
+                date_cols.append("Order_Date")
+
         enriched = enriched.join(dim_date.select(*date_cols), on="DateKey", how="left")
-        if "Date" in enriched.columns and "Order_Date" not in enriched.columns:
-            enriched = enriched.withColumnRenamed("Date", "Order_Date")
 
     return enriched
 
@@ -260,9 +337,15 @@ def build_all_marts(clean_df: Any) -> dict[str, Any]:
     marts = {
         "mart_overview": overview,
         "mart_order_summary": build_mart_order_summary(clean_df),
-        "mart_revenue_by_region": aggregate_sales(clean_df, ["Region"]).orderBy(col("Total_Revenue").desc()),
-        "mart_revenue_by_country": aggregate_sales(clean_df, ["Region", "Country"]).orderBy(col("Total_Revenue").desc()),
-        "mart_revenue_by_category": aggregate_sales(clean_df, ["Category", "Sub_Category"], include_quantity=True).orderBy(col("Total_Revenue").desc()),
+        "mart_revenue_by_region": aggregate_sales(clean_df, ["Region"]).orderBy(
+            col("Total_Revenue").desc()
+        ),
+        "mart_revenue_by_country": aggregate_sales(clean_df, ["Region", "Country"]).orderBy(
+            col("Total_Revenue").desc()
+        ),
+        "mart_revenue_by_category": aggregate_sales(
+            clean_df, ["Category", "Sub_Category"], include_quantity=True
+        ).orderBy(col("Total_Revenue").desc()),
         "mart_top_products_by_revenue": (
             clean_df.groupBy("Product_Name", "Category", "Sub_Category")
             .agg(
@@ -273,7 +356,9 @@ def build_all_marts(clean_df: Any) -> dict[str, Any]:
             .orderBy(col("Total_Revenue").desc())
             .limit(10)
         ),
-        "mart_payment_analysis": aggregate_sales(clean_df, ["Payment_Method"]).orderBy(col("Total_Revenue").desc()),
+        "mart_payment_analysis": aggregate_sales(clean_df, ["Payment_Method"]).orderBy(
+            col("Total_Revenue").desc()
+        ),
         "mart_shipping_analysis": (
             clean_df.groupBy("Shipping_Method", "Delivery_Level")
             .agg(
@@ -284,13 +369,18 @@ def build_all_marts(clean_df: Any) -> dict[str, Any]:
             )
             .orderBy(col("Total_Orders").desc())
         ),
-        "mart_order_status_analysis": aggregate_sales(clean_df, ["Order_Status"]).orderBy(col("Total_Orders").desc()),
-        "mart_monthly_revenue": aggregate_sales(clean_df, ["Year", "Month"]).orderBy("Year", "Month"),
-        "mart_customer_segment_analysis": aggregate_sales(clean_df, ["Customer_Segment"], include_average_order_value=True).orderBy(col("Total_Revenue").desc()),
+        "mart_order_status_analysis": aggregate_sales(clean_df, ["Order_Status"]).orderBy(
+            col("Total_Orders").desc()
+        ),
+        "mart_monthly_revenue": aggregate_sales(clean_df, ["Year", "Month"]).orderBy(
+            "Year", "Month"
+        ),
+        "mart_customer_segment_analysis": aggregate_sales(
+            clean_df, ["Customer_Segment"], include_average_order_value=True
+        ).orderBy(col("Total_Revenue").desc()),
         "mart_rfm_customer_segmentation": build_rfm_mart(clean_df),
         "mart_abc_product_analysis": build_abc_mart(clean_df),
     }
 
     LOGGER.info("Đã tạo hoàn tất Gold Data Marts.")
     return marts
-

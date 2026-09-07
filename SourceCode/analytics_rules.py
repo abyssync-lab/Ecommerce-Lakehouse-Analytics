@@ -7,7 +7,11 @@ và Phân loại sản phẩm Pareto ABC. Được sử dụng chung bởi cả 
 from __future__ import annotations
 
 from dataclasses import dataclass
+from functools import lru_cache
+from pathlib import Path
 from typing import TYPE_CHECKING
+
+import yaml
 
 if TYPE_CHECKING:
     import pandas as pd
@@ -47,6 +51,30 @@ RFM_CASUAL = "Recent & Casual Customers"
 ABC_CLASS_A = "Class A (Top 80% Revenue)"
 ABC_CLASS_B = "Class B (Next 15% Revenue)"
 ABC_CLASS_C = "Class C (Tail 5% Revenue)"
+
+BUSINESS_METRICS_PATH = Path(__file__).resolve().parents[1] / "contracts" / "business_metrics.yaml"
+
+
+@lru_cache(maxsize=1)
+def _load_business_status_policy() -> dict[str, list[str]]:
+    """Đọc status policy chung để Pandas và Spark dùng cùng một quy tắc KPI."""
+    if not BUSINESS_METRICS_PATH.exists():
+        raise FileNotFoundError(f"Thiếu business metric contract: {BUSINESS_METRICS_PATH}")
+    data = yaml.safe_load(BUSINESS_METRICS_PATH.read_text(encoding="utf-8")) or {}
+    return {
+        metric: [str(status) for status in data.get(metric, {}).get("included_statuses", [])]
+        for metric in ("rfm", "abc")
+    }
+
+
+def _filter_metric_rows(dataframe: pd.DataFrame, metric: str) -> pd.DataFrame:
+    """Lọc dữ liệu theo policy nếu DataFrame có cột trạng thái."""
+    if "Order_Status" not in dataframe.columns:
+        return dataframe
+    statuses = _load_business_status_policy()[metric]
+    if not statuses:
+        raise ValueError(f"Business policy {metric} không có included_statuses")
+    return dataframe[dataframe["Order_Status"].isin(statuses)].copy()
 
 
 def classify_rfm_segment(
@@ -119,7 +147,9 @@ def calculate_rfm_pandas(
     if dataframe.empty:
         raise ValueError("Không thể phân tích RFM với dữ liệu rỗng")
 
-    df = dataframe.copy()
+    df = _filter_metric_rows(dataframe, "rfm")
+    if df.empty:
+        raise ValueError("Không có order Delivered để phân tích RFM")
     df["Order_Date"] = pd.to_datetime(df["Order_Date"], errors="raise")
 
     reference_date = (
@@ -169,8 +199,12 @@ def calculate_abc_pandas(
     if dataframe.empty:
         raise ValueError("Không thể phân tích ABC với dữ liệu rỗng")
 
+    df = _filter_metric_rows(dataframe, "abc")
+    if df.empty:
+        raise ValueError("Không có order Delivered để phân tích ABC")
+
     product_sales = (
-        dataframe.groupby("Product_Name")
+        df.groupby("Product_Name")
         .agg(
             Total_Orders=("Order_ID", "nunique"),
             Total_Quantity=("Quantity", "sum"),

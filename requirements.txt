@@ -2,5 +2,5 @@
 pyspark>=3.5,<4.0
 delta-spark>=3.2,<4.0
 pandas>=2.0,<3.0
-pymongo>=4.6,<5.0
+PyYAML>=6.0,<7.0
 pytest>=8.0,<9.0

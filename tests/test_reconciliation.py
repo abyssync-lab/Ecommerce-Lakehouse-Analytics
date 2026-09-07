@@ -11,40 +11,16 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-import pytest
-
 SOURCE_DIR = Path(__file__).resolve().parents[1] / "SourceCode"
 if str(SOURCE_DIR) not in sys.path:
     sys.path.insert(0, str(SOURCE_DIR))
 
-try:
-    from lakehouse.dimensions import build_all_dimensions
-    from lakehouse.marts import build_all_marts, build_fact_sales
-    from lakehouse.reconciliation import run_full_reconciliation
-    from lakehouse.silver import clean_and_enrich_silver
-    from pyspark.sql import SparkSession
-    from pyspark.sql.functions import col, count, countDistinct
-    from pyspark.sql.functions import sum as spark_sum
-
-    HAS_PYSPARK = True
-except ImportError:
-    HAS_PYSPARK = False
-
-
-
-@pytest.fixture(scope="module")
-def spark_session():
-    """Fixture khởi tạo SparkSession local cho kiểm thử đối soát dữ liệu."""
-    if not HAS_PYSPARK:
-        pytest.skip("PySpark chưa được cài đặt.")
-    spark = (
-        SparkSession.builder.master("local[1]")
-        .appName("ReconciliationUnitTest")
-        .config("spark.driver.host", "127.0.0.1")
-        .getOrCreate()
-    )
-    yield spark
-    spark.stop()
+from lakehouse.dimensions import build_all_dimensions
+from lakehouse.marts import build_all_marts, build_fact_sales
+from lakehouse.reconciliation import run_full_reconciliation
+from lakehouse.silver import clean_and_enrich_silver
+from pyspark.sql.functions import countDistinct
+from pyspark.sql.functions import sum as spark_sum
 
 
 def test_gold_revenue_reconciles_with_silver_and_marts(spark_session):
@@ -177,4 +153,3 @@ def test_data_reconciliation_gate_full_report(spark_session, tmp_path):
     assert json_report_path.exists()
     assert report["checks"]["revenue_invariant"]["passed"] is True
     assert report["checks"]["foreign_key_completeness"]["passed"] is True
-

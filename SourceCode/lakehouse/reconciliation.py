@@ -16,8 +16,9 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from pyspark.sql.functions import col, count, countDistinct
+from pyspark.sql.functions import col, count, countDistinct, lead, when
 from pyspark.sql.functions import sum as spark_sum
+from pyspark.sql.window import Window
 
 LOGGER = logging.getLogger(__name__)
 
@@ -113,23 +114,43 @@ def reconcile_scd2_temporal_integrity(dim_customer: Any) -> dict[str, Any]:
             "passed": True,
             "note": "dim_customer đang chạy ở chế độ SCD Type 1, bỏ qua kiểm tra SCD2.",
         }
+    if "Is_Current" not in dim_customer.columns:
+        return {
+            "check": "scd2_temporal_integrity",
+            "passed": False,
+            "note": "dim_customer có cột thời gian nhưng thiếu Is_Current.",
+        }
 
-    # 1. Kiểm tra ValidFrom < ValidTo
-    invalid_intervals = dim_customer.filter(col("ValidFrom") >= col("ValidTo")).count()
+    # 1. Kiểm tra từng khoảng có đủ mốc và ValidFrom < ValidTo.
+    invalid_intervals = dim_customer.filter(
+        col("ValidFrom").isNull() | col("ValidTo").isNull() | (col("ValidFrom") >= col("ValidTo"))
+    ).count()
 
-    # 2. Kiểm tra đúng 1 Is_Current = 1 cho mỗi Customer_ID
-    current_counts = (
-        dim_customer.filter(col("Is_Current") == 1)
-        .groupBy("Customer_ID")
-        .agg(count("CustomerKey").alias("current_cnt"))
+    # 2. Kiểm tra hai khoảng liên tiếp của cùng customer không bị chồng lấn.
+    ordered = dim_customer.withColumn(
+        "_next_valid_from",
+        lead("ValidFrom").over(
+            Window.partitionBy("Customer_ID").orderBy("ValidFrom", "CustomerKey")
+        ),
+    )
+    overlapping_intervals = ordered.filter(
+        col("_next_valid_from").isNotNull() & (col("ValidTo") > col("_next_valid_from"))
+    ).count()
+
+    # 3. Bao gồm cả customer có 0 current row; chỉ group các row Is_Current=1
+    # sẽ bỏ sót trường hợp này.
+    current_counts = dim_customer.groupBy("Customer_ID").agg(
+        count("CustomerKey").alias("version_cnt"),
+        spark_sum(when(col("Is_Current") == 1, 1).otherwise(0)).alias("current_cnt"),
     )
     duplicate_current = current_counts.filter(col("current_cnt") != 1).count()
 
-    passed = (invalid_intervals == 0) and (duplicate_current == 0)
+    passed = invalid_intervals == 0 and overlapping_intervals == 0 and duplicate_current == 0
     return {
         "check": "scd2_temporal_integrity",
         "passed": passed,
         "invalid_intervals_count": invalid_intervals,
+        "overlapping_intervals_count": overlapping_intervals,
         "customers_with_abnormal_current_count": duplicate_current,
     }
 
@@ -144,6 +165,7 @@ def run_full_reconciliation(
     invalid_count: int,
     run_id: str | None = None,
     export_path: str | Path | None = None,
+    valid_count: int | None = None,
 ) -> dict[str, Any]:
     """Thực thi toàn bộ bộ kiểm thử Data Reconciliation Gate và xuất báo cáo JSON.
 
@@ -157,6 +179,8 @@ def run_full_reconciliation(
         invalid_count: Số dòng bị reject vào quarantine.
         run_id: Mã định danh lần chạy.
         export_path: Đường dẫn lưu trữ báo cáo JSON tùy chọn.
+        valid_count: Số event hợp lệ của batch hiện tại. Incremental phải truyền giá trị
+            này vì ``clean_df`` là current-state Silver, không phải toàn bộ Bronze event history.
 
     Returns:
         Dictionary chứa kết quả toàn bộ các kiểm tra đối soát.
@@ -167,7 +191,7 @@ def run_full_reconciliation(
     rev_check = reconcile_revenue_invariant(clean_df, fact_sales, mart_overview)
     row_check = reconcile_row_conservation(
         raw_count=raw_count,
-        valid_count=clean_df.count(),
+        valid_count=clean_df.count() if valid_count is None else valid_count,
         invalid_count=invalid_count,
         duplicate_count=duplicate_count,
     )
