@@ -17,7 +17,8 @@ import argparse
 import uuid
 
 from config import SETTINGS
-from lakehouse.ingestion import calculate_source_hash, read_raw_csv
+from lakehouse.file_manifest import FileManifest
+from lakehouse.ingestion import calculate_source_hash, calculate_source_size, read_raw_csv
 from lakehouse.pipeline import (
     create_spark_session,
     run_delta_demo,
@@ -70,7 +71,25 @@ def main() -> None:
                 if isinstance(exc, FileNotFoundError)
                 else "FILE_SCHEMA_MISMATCH"
             )
+            # File manifest phải ghi cả thất bại trước Bronze để operator biết
+            # source đã được phát hiện nhưng chưa commit và có thể retry.
+            manifest = FileManifest(spark)
+            manifest.register_discovered(
+                source_system="ecommerce_csv",
+                source_hash=source_hash,
+                source_uri=source_uri,
+                file_size_bytes=calculate_source_size(source_uri),
+                contract_version="2.0.0",
+                run_id=run_id,
+            )
             registry.mark_failed(run_id, exc, error_code=error_code)
+            manifest.mark_failed(
+                source_system="ecommerce_csv",
+                source_hash=source_hash,
+                run_id=run_id,
+                error_code=error_code,
+                error_message=str(exc),
+            )
             spark.stop()
             raise
         result = run_incremental_pipeline(

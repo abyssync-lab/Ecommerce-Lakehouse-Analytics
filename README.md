@@ -240,6 +240,9 @@ python SourceCode/SparkEcommerceAnalysis.py --input Data/EcommerceSalesDataset.c
 ~~~
 
 Bootstrap tạo Bronze history, Silver current state, Gold staging và publication đầu tiên.
+Bootstrap chỉ hợp lệ khi Bronze đang rỗng; nếu lakehouse đã có dữ liệu, dùng
+incremental hoặc dọn local storage có chủ đích trước khi bootstrap lại để tránh
+ghi đè current state.
 
 ### Incremental batch
 
@@ -275,8 +278,9 @@ retry với cùng source hash.
 python SourceCode/generate_portfolio_report.py --source published
 ~~~
 
-Mặc định report đọc Gold đã publish. Dùng --source csv chỉ khi cần validation
-độc lập với lakehouse.
+Mặc định report đọc `serving.gold_sales_enriched` và ghép `serving.fact_order_fulfillment`
+đã publish, nhờ đó vừa dùng certified line measures vừa giữ đúng order-level
+shipping cost. Dùng `--source csv` chỉ khi cần validation độc lập với lakehouse.
 
 ### Nhóm lệnh local
 
@@ -311,8 +315,9 @@ validation. Integration test không được skip khi thiếu PySpark trong CI.
 | [GOLD_MODEL.md](docs/GOLD_MODEL.md) | Dimensions, facts, SCD2, KPI policy và run-scoped staging |
 | [OPERATIONS.md](docs/OPERATIONS.md) | Cài đặt, chạy batch, failure handling, monitoring và CI |
 
-Các tài liệu cũ trong docs/ được giữ như bối cảnh portfolio; sáu tài liệu trên là
-bộ hướng dẫn bám sát implementation hiện tại.
+Chỉ giữ các tài liệu thiết kế cần cho pipeline và benchmark có thể tái sinh.
+`BUSINESS_INSIGHTS.md` là output runtime của report, không commit bản snapshot cũ
+để tránh nhầm báo cáo CSV với certified Gold.
 
 ## Trạng thái kiểm chứng hiện tại
 

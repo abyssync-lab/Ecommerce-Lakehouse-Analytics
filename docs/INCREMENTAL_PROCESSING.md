@@ -14,16 +14,14 @@ Một row đại diện cho một source file theo khóa:
 (source_system, source_hash)
 ~~~
 
-Các trường quan trọng:
+Các trường quan trọng bám đúng `FileManifest.SCHEMA`:
 
-- file_id;
-- source_uri;
-- source_hash;
-- file_size_bytes;
-- discovered_at;
-- first_run_id và last_run_id;
-- status;
-- raw_rows.
+- source_system và source_hash;
+- source_uri, file_size_bytes, contract_version;
+- first_seen_at, first_run_id và last_run_id;
+- bronze_status (`DISCOVERED`, `BRONZE_COMMITTED` hoặc `FAILED`);
+- bronze_committed_at, raw_rows;
+- last_error_code, last_error_message và last_updated_at.
 
 File manifest là nơi trả lời file đã được commit vào Bronze chưa. Không đọc chung
 event registry để suy luận trạng thái file.
@@ -37,7 +35,7 @@ run_id, batch_id, source_system, source_uri, source_hash
 status, started_at, completed_at
 raw_rows, exact_duplicate_rows, rejected_rows, valid_event_rows
 superseded_rows, inserted_rows, updated_rows, unchanged_rows
-stale_rows, deleted_rows
+stale_rows, deleted_rows, orphan_delete_rows
 gold_run_id, published_version
 error_code, error_message
 pipeline_version, contract_version
@@ -116,4 +114,3 @@ Các nhánh lỗi:
 Run registry phải lưu raw_rows, rejected_rows, duplicate_rows, valid_event_rows,
 superseded_rows, inserted_rows, updated_rows, unchanged_rows, stale_rows và
 deleted_rows. Đây là operational evidence, không chỉ log.
-

@@ -61,6 +61,34 @@ def safe_ratio(numerator: float, denominator: float) -> float:
     return numerator / denominator if denominator else 0.0
 
 
+def _normalise_reporting_measures(dataframe: pd.DataFrame) -> pd.DataFrame:
+    """Đưa measure Gold về tên báo cáo; ưu tiên số liệu đã tính lại ở Silver."""
+    result = dataframe.copy()
+    if "Revenue" not in result.columns and "Net_Line_Amount" in result.columns:
+        result["Revenue"] = result["Net_Line_Amount"]
+    if "Profit" not in result.columns and "Gross_Profit" in result.columns:
+        result["Profit"] = result["Gross_Profit"]
+    if "Shipping_Cost" not in result.columns and "Order_Shipping_Cost" in result.columns:
+        result["Shipping_Cost"] = result["Order_Shipping_Cost"]
+    required = {"Revenue", "Profit"}.difference(result.columns)
+    if required:
+        raise ValueError(f"Thiếu certified measures cho báo cáo: {sorted(required)}")
+    return result
+
+
+def _order_level_shipping_cost(dataframe: pd.DataFrame) -> float:
+    """Tính chi phí vận chuyển một lần cho mỗi order, không nhân theo số line."""
+    if "Shipping_Cost" not in dataframe.columns:
+        return 0.0
+    return float(
+        dataframe[["Order_ID", "Shipping_Cost"]]
+        .drop_duplicates("Order_ID")
+        .loc[:, "Shipping_Cost"]
+        .fillna(0.0)
+        .sum()
+    )
+
+
 def calculate_overview(dataframe: pd.DataFrame) -> OverviewMetrics:
     """Tính toán toàn bộ KPI tổng quan theo đúng Grain đơn hàng (Order Grain).
 
@@ -70,10 +98,11 @@ def calculate_overview(dataframe: pd.DataFrame) -> OverviewMetrics:
     Returns:
         Đối tượng OverviewMetrics chứa các con số KPI đã được làm tròn.
     """
+    dataframe = _normalise_reporting_measures(dataframe)
     order_count = int(dataframe["Order_ID"].nunique())
     revenue = float(dataframe["Revenue"].sum())
     profit = float(dataframe["Profit"].sum())
-    shipping_cost = float(dataframe["Shipping_Cost"].sum())
+    shipping_cost = _order_level_shipping_cost(dataframe)
 
     # Lọc đơn hàng phân biệt để tính tỷ lệ hủy/trả hàng chính xác
     status_by_order = dataframe[["Order_ID", "Order_Status"]].drop_duplicates("Order_ID")
@@ -107,6 +136,7 @@ def aggregate_performance(
     Returns:
         DataFrame đã tổng hợp các chỉ số Orders, Revenue, Profit, Profit_Margin_Percent.
     """
+    dataframe = _normalise_reporting_measures(dataframe)
     return (
         dataframe.groupby(dimensions, dropna=False)
         .agg(

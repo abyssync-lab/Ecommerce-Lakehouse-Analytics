@@ -77,6 +77,17 @@ def _filter_metric_rows(dataframe: pd.DataFrame, metric: str) -> pd.DataFrame:
     return dataframe[dataframe["Order_Status"].isin(statuses)].copy()
 
 
+def _measure_column(dataframe: pd.DataFrame, certified_name: str, legacy_name: str) -> str:
+    """Chọn measure đã chứng nhận trước measure nguồn tương thích ngược."""
+    if certified_name in dataframe.columns:
+        return certified_name
+    if legacy_name in dataframe.columns:
+        return legacy_name
+    raise ValueError(
+        f"Thiếu measure {certified_name}; dữ liệu cũng không có cột tương thích {legacy_name}"
+    )
+
+
 def classify_rfm_segment(
     recency_days: int,
     frequency_orders: int,
@@ -151,6 +162,7 @@ def calculate_rfm_pandas(
     if df.empty:
         raise ValueError("Không có order Delivered để phân tích RFM")
     df["Order_Date"] = pd.to_datetime(df["Order_Date"], errors="raise")
+    monetary_column = _measure_column(df, "Net_Line_Amount", "Revenue")
 
     reference_date = (
         pd.Timestamp(analysis_date) if analysis_date is not None else df["Order_Date"].max()
@@ -164,7 +176,7 @@ def calculate_rfm_pandas(
         .agg(
             Last_Purchase=("Order_Date", "max"),
             Frequency=("Order_ID", "nunique"),
-            Monetary=("Revenue", "sum"),
+            Monetary=(monetary_column, "sum"),
         )
         .reset_index()
     )
@@ -202,14 +214,16 @@ def calculate_abc_pandas(
     df = _filter_metric_rows(dataframe, "abc")
     if df.empty:
         raise ValueError("Không có order Delivered để phân tích ABC")
+    revenue_column = _measure_column(df, "Net_Line_Amount", "Revenue")
+    profit_column = _measure_column(df, "Gross_Profit", "Profit")
 
     product_sales = (
         df.groupby("Product_Name")
         .agg(
             Total_Orders=("Order_ID", "nunique"),
             Total_Quantity=("Quantity", "sum"),
-            Total_Revenue=("Revenue", "sum"),
-            Total_Profit=("Profit", "sum"),
+            Total_Revenue=(revenue_column, "sum"),
+            Total_Profit=(profit_column, "sum"),
         )
         .sort_values("Total_Revenue", ascending=False)
         .reset_index()

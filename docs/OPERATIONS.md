@@ -36,6 +36,10 @@ module transformation.
 
 ### Bootstrap
 
+Bootstrap là full initialization và chỉ chạy khi Bronze chưa tồn tại. Nếu Bronze
+đã có dữ liệu, không chạy lại bootstrap với source khác; hãy chạy incremental hoặc
+dọn local storage có chủ đích.
+
 ~~~powershell
 python SourceCode/validate_input.py Data/EcommerceSalesDataset.csv
 python SourceCode/SparkEcommerceAnalysis.py --input Data/EcommerceSalesDataset.csv
@@ -141,4 +145,3 @@ Không dùng pytest.skip để che việc thiếu PySpark/Delta trong integratio
 Reset storage chỉ dành cho môi trường demo/test cô lập. Không xóa Bronze hoặc
 control tables trong môi trường cần audit. Khi cần reset, ghi rõ target path và
 đảm bảo không trỏ vào HDFS hoặc storage production.
-

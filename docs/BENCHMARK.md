@@ -24,7 +24,7 @@
 | **100K** | 100,000 | ~18.50 MB | ~12.4 s | ~8,064 rows/s | 8 | 100,000 | ✅ 100% |
 | **1M** | 1,000,000 | ~185.00 MB | ~94.8 s | ~10,548 rows/s | 16 | 1,000,000 | ✅ 100% |
 
-*Ghi chú: Runtime bao gồm toàn bộ chu trình đọc CSV $\to$ Clean & Quarantine $\to$ 7 Kimball Dimensions (SCD2) $\to$ FactSales $\to$ 12 Gold Marts. Artifacts số liệu chi tiết tự động lưu tại `scratch/benchmark_results.json` và `scratch/benchmark_environment.json`.*
+*Ghi chú: Runtime bao gồm toàn bộ chu trình đọc CSV $\to$ Clean & Quarantine $\to$ 7 Kimball Dimensions (SCD2) $\to$ 2 facts $\to$ 6 certified marts. Artifacts số liệu chi tiết tự động lưu tại `scratch/benchmark_results.json` và `scratch/benchmark_environment.json`.*
 
 ---
 

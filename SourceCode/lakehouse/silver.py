@@ -510,9 +510,10 @@ def clean_and_enrich_silver(
 
     clean_df = clean_df.withColumn(
         "Delivery_Level",
-        when(col("Shipping_Days") <= 3, "Fast")
-        .when(col("Shipping_Days") <= 7, "Normal")
-        .otherwise("Slow"),
+        when(col("Shipping_Days").isNull(), lit("Unknown"))
+        .when(col("Shipping_Days") <= 3, lit("Fast"))
+        .when(col("Shipping_Days") <= 7, lit("Normal"))
+        .otherwise(lit("Slow")),
     )
 
     clean_df = clean_df.cache()
@@ -597,14 +598,30 @@ def build_silver_orders_current(events_df: Any) -> Any:
     if "Order_Operation" not in events_df.columns and "Operation" in events_df.columns:
         order_source = events_df.filter(col("Operation") != "DELETE")
     latest = _latest_event(order_source, ["Order_ID"])
-    # Event v2 hiện tại là line feed: DELETE một line không được xóa cả order.
-    # Khi OMS có order feed riêng, adapter sẽ truyền Order_Operation để bật soft delete
-    # ở header; nếu chưa có thì header vẫn active.
+
+    # Một order có thể chỉ nhận DELETE ở line-level. Khi đó header cũ vẫn còn
+    # trong event history nhưng không còn line active để phục vụ Gold.
+    active_order_ids = None
+    if "Order_Line_ID" in events_df.columns:
+        latest_lines = _latest_event(events_df, ["Order_ID", "Order_Line_ID"])
+        active_order_ids = (
+            latest_lines.filter(~col("Is_Deleted") & (col("Operation") != "DELETE"))
+            .select("Order_ID")
+            .dropDuplicates()
+            .withColumn("_has_active_line", lit(True))
+        )
+        latest = latest.join(active_order_ids, on="Order_ID", how="left")
+
+    # Event v2 hiện tại là line feed: DELETE một line không xóa order nếu vẫn còn
+    # line active. Khi OMS có order feed riêng, Order_Operation có quyền quyết định
+    # soft delete ở header; dữ liệu legacy không có line id được coi là active.
     if "Order_Operation" in latest.columns:
         latest = latest.withColumn(
             "Is_Deleted",
             col("Order_Operation") == "DELETE",
         )
+    elif active_order_ids is not None:
+        latest = latest.withColumn("Is_Deleted", ~coalesce(col("_has_active_line"), lit(False)))
     else:
         latest = latest.withColumn("Is_Deleted", lit(False))
     columns = [

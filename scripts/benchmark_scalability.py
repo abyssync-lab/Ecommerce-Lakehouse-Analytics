@@ -306,6 +306,7 @@ def save_benchmark_report(results: list[dict], manifest: dict[str, Any] | None =
             "",
             "2. **Bảo Toàn Số Dòng & Không Trùng Lặp Fact (Zero Fact Duplication):**",
             "   - Tỷ lệ bảo toàn Grain đạt **100%**: Số dòng FactSales tạo ra bằng chính xác số bản ghi sạch hợp lệ tầng Silver.",
+            "   - Gold hiện gồm 7 dimensions, 2 facts và 6 certified marts; benchmark không đếm các bảng control/quarantine.",
             "   - Nhờ áp dụng chiến lược khóa đại diện xác định (*Deterministic Rebuild Key*) và chuẩn hóa Dimension 1 Customer = 1 Row / SCD2.",
             "",
             "3. **Tái Lập Kết Quả (Reproducibility):**",

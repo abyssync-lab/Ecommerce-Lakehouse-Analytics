@@ -9,8 +9,9 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Any
 
-os.environ["PYSPARK_PYTHON"] = sys.executable
-os.environ["PYSPARK_DRIVER_PYTHON"] = sys.executable
+# Tôn trọng runtime do CI hoặc cluster cung cấp; local mới dùng Python hiện tại.
+os.environ.setdefault("PYSPARK_PYTHON", sys.executable)
+os.environ.setdefault("PYSPARK_DRIVER_PYTHON", sys.executable)
 
 from config import SETTINGS, PipelineConfig, auto_set_spark_home_env
 
@@ -79,13 +80,13 @@ def _enforce_reject_rate(
 
 
 def _customer_history_source(spark: SparkSession, fallback_df: Any, use_scd2: bool) -> Any | None:
-    """Lấy customer event history từ Bronze để SCD2 không mất version cũ."""
+    """Lấy lịch sử event hợp lệ từ Silver để SCD2 không dùng dòng lỗi."""
     if not use_scd2:
         return None
-    bronze_path = SETTINGS.get_storage_path(SETTINGS.bronze_delta)
-    if not DeltaTable.isDeltaTable(spark, bronze_path):
+    silver_path = SETTINGS.get_storage_path(SETTINGS.silver_delta)
+    if not DeltaTable.isDeltaTable(spark, silver_path):
         return fallback_df
-    history = spark.read.format("delta").load(bronze_path)
+    history = spark.read.format("delta").load(silver_path)
     if "Operation" in history.columns:
         history = history.filter(col("Operation") != "DELETE")
     if "Customer_ID" not in history.columns:
@@ -219,6 +220,7 @@ def run_pipeline(
     spark = create_spark_session()
     registry = BatchRegistry(spark)
     clean_df = None
+    pipeline_succeeded = False
 
     # Bootstrap cũng phải replay-safe. Chỉ môi trường demo/reset mới được phép
     # overwrite một source hash đã certified; run bình thường không được nạp lại.
@@ -254,11 +256,17 @@ def run_pipeline(
     try:
         # 1. Bronze: đọc file, validate schema và append raw event kèm lineage.
         LOGGER.info("--- 1. INGESTION & 2. BRONZE LAYER ---")
+        bronze_path = SETTINGS.get_storage_path(SETTINGS.bronze_delta)
+        if DeltaTable.isDeltaTable(spark, bronze_path):
+            raise ValueError(
+                "BOOTSTRAP_REQUIRES_EMPTY_BRONZE: Bronze đã có dữ liệu; "
+                "hãy dùng incremental hoặc dọn local storage có chủ đích trước khi bootstrap."
+            )
         bronze_df = ingest_to_bronze(
             spark,
             effective_input,
-            # Bootstrap bình thường vẫn append vào Bronze bất biến. Việc xóa dữ liệu
-            # chỉ được thực hiện bởi lệnh reset-demo có chủ đích.
+            # Bootstrap bình thường append vào Bronze bất biến; việc xóa dữ liệu
+            # phải do operator thực hiện ngoài pipeline với phạm vi được xác nhận.
             mode="append",
             batch_id=batch_id,
             run_id=run_id,
@@ -407,6 +415,7 @@ def run_pipeline(
             raise
 
         LOGGER.info("HOÀN THÀNH DATA LAKEHOUSE PIPELINE THÀNH CÔNG (CERTIFIED PASS)!")
+        pipeline_succeeded = True
         return PipelineRunResult(
             run_id=run_id,
             batch_id=batch_id,
@@ -437,6 +446,9 @@ def run_pipeline(
     finally:
         if clean_df is not None:
             clean_df.unpersist()
+        if not pipeline_succeeded:
+            # CLI không nhận được Spark để đóng khi pipeline lỗi.
+            spark.stop()
 
 
 def run_incremental_pipeline(
@@ -480,6 +492,7 @@ def run_incremental_pipeline(
     LOGGER.info("Run ID: %s | Batch ID: %s | SCD2: %s", run_id, bid, effective_scd2)
     LOGGER.info("=====================================================")
 
+    owns_spark = spark is None
     if spark is None:
         spark = create_spark_session()
 
@@ -506,6 +519,8 @@ def run_incremental_pipeline(
 
     raw_count = 0
     clean_batch = None
+    manifest_registered = False
+    bronze_committed = False
     try:
         raw_count = new_batch_df.count()
         registry.start_run(
@@ -518,6 +533,18 @@ def run_incremental_pipeline(
             pipeline_version="1.0.0",
             contract_version="2.0.0",
         )
+
+        # Đăng ký file trước file-level validation để schema lỗi vẫn xuất hiện
+        # trong control plane và có thể phân biệt với file chưa từng được phát hiện.
+        manifest.register_discovered(
+            source_system="ecommerce_csv",
+            source_hash=shash,
+            source_uri=source_location,
+            file_size_bytes=calculate_source_size(source_location),
+            contract_version="2.0.0",
+            run_id=run_id,
+        )
+        manifest_registered = True
 
         required_event_columns = {"Order_ID", "Order_Line_ID", "Source_Updated_At", "Operation"}
         missing_event_columns = required_event_columns.difference(new_batch_df.columns)
@@ -542,6 +569,7 @@ def run_incremental_pipeline(
             enriched_batch = (
                 spark.read.format("delta").load(bronze_path).filter(col("_source_hash") == shash)
             )
+            bronze_committed = True
             if not manifest.is_bronze_committed("ecommerce_csv", shash):
                 # Khôi phục manifest nếu process chết sau Delta commit nhưng
                 # trước bước cập nhật control plane.
@@ -583,6 +611,9 @@ def run_incremental_pipeline(
                 contract_version="2.0.0",
             )
             enriched_batch.write.format("delta").mode("append").save(bronze_path)
+            # Delta append đã thành công; registry file chỉ là bước cập nhật
+            # control plane tiếp theo và không được đánh đồng hai sự kiện này.
+            bronze_committed = True
             manifest.mark_bronze_committed(
                 source_system="ecommerce_csv",
                 source_hash=shash,
@@ -745,6 +776,34 @@ def run_incremental_pipeline(
             orphan_delete_rows = comparison.filter(
                 ~target_exists & (col("source.Operation") == "DELETE")
             ).count()
+            if orphan_delete_rows:
+                # DELETE không có current-state target phải được audit như dữ liệu
+                # lỗi; không được coi là valid event đã merge thành công.
+                orphan_deletes = comparison.filter(
+                    ~target_exists & (col("source.Operation") == "DELETE")
+                ).select(*[col(f"source.{column}").alias(column) for column in merge_batch.columns])
+                (
+                    orphan_deletes.withColumn("error_codes", array(lit("ORPHAN_DELETE")))
+                    .withColumn("rejection_reasons", col("error_codes"))
+                    .withColumn("rejection_reason", lit("ORPHAN_DELETE"))
+                    .withColumn("rejected_at", current_timestamp())
+                    .write.format("delta")
+                    .mode("append")
+                    .option("mergeSchema", "true")
+                    .save(quarantine_path)
+                )
+                valid_count -= orphan_delete_rows
+                batch_rejected_count += orphan_delete_rows
+                _enforce_reject_rate(
+                    raw_count,
+                    batch_rejected_count,
+                    config.max_reject_rate if config else None,
+                )
+                merge_batch = merge_batch.join(
+                    orphan_deletes.select("Order_ID", "Order_Line_ID").dropDuplicates(),
+                    on=["Order_ID", "Order_Line_ID"],
+                    how="left_anti",
+                )
 
             merge_cond = (
                 "target.Order_ID = source.Order_ID AND target.Order_Line_ID = source.Order_Line_ID"
@@ -803,6 +862,27 @@ def run_incremental_pipeline(
             silver_inserts = merge_batch.filter(col("Operation") != "DELETE")
             inserted_rows = silver_inserts.count()
             orphan_delete_rows = merge_batch.filter(col("Operation") == "DELETE").count()
+            if orphan_delete_rows:
+                # Giữ lại DELETE mồ côi trong Quarantine để không làm mất event nguồn.
+                (
+                    merge_batch.filter(col("Operation") == "DELETE")
+                    .withColumn("error_codes", array(lit("ORPHAN_DELETE")))
+                    .withColumn("rejection_reasons", col("error_codes"))
+                    .withColumn("rejection_reason", lit("ORPHAN_DELETE"))
+                    .withColumn("rejected_at", current_timestamp())
+                    .write.format("delta")
+                    .mode("append")
+                    .option("mergeSchema", "true")
+                    .save(quarantine_path)
+                )
+                valid_count -= orphan_delete_rows
+                batch_rejected_count += orphan_delete_rows
+                _enforce_reject_rate(
+                    raw_count,
+                    batch_rejected_count,
+                    config.max_reject_rate if config else None,
+                )
+                merge_batch = silver_inserts
             if inserted_rows == 0:
                 raise ValueError(
                     "ORPHAN_DELETE: không thể tạo Silver current state từ DELETE mồ côi"
@@ -940,15 +1020,32 @@ def run_incremental_pipeline(
     except Exception as exc:
         # Bất kỳ lỗi nào ở Bronze/Silver/Gold/Reconciliation đều phải làm control plane
         # chuyển FAILED để lần retry sau được phân biệt với một run đang chạy dở.
-        current = registry.find_by_run_id(run_id)
-        if current is None or current["status"] != "CONTROL_FINALIZATION_PENDING":
-            registry.mark_failed(
-                run_id,
-                exc,
-                error_code=(
-                    "RECONCILIATION_FAILED"
-                    if isinstance(exc, PipelineCertificationError)
-                    else "PIPELINE_FAILED"
-                ),
-            )
+        try:
+            current = registry.find_by_run_id(run_id)
+            if current is None or current["status"] != "CONTROL_FINALIZATION_PENDING":
+                registry.mark_failed(
+                    run_id,
+                    exc,
+                    error_code=(
+                        "RECONCILIATION_FAILED"
+                        if isinstance(exc, PipelineCertificationError)
+                        else "PIPELINE_FAILED"
+                    ),
+                )
+        finally:
+            if manifest_registered and not bronze_committed:
+                manifest.mark_failed(
+                    source_system="ecommerce_csv",
+                    source_hash=shash,
+                    run_id=run_id,
+                    error_code=(
+                        "FILE_SCHEMA_MISMATCH"
+                        if "FILE_SCHEMA_MISMATCH" in str(exc)
+                        else "PIPELINE_FAILED"
+                    ),
+                    error_message=str(exc),
+                )
+            # Chỉ đóng Spark do function tự tạo; fixture hoặc caller vẫn sở hữu Spark.
+            if owns_spark:
+                spark.stop()
         raise

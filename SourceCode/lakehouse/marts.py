@@ -231,8 +231,10 @@ def build_fact_order_fulfillment(
         round(spark_sum("Net_Line_Amount"), 2).alias("Order_Value"),
         round(spark_sum("Gross_Profit"), 2).alias("Order_Profit"),
     )
+    # Order fact chỉ đại diện cho order còn ít nhất một line active. Nếu dùng
+    # left join, order đã xóa toàn bộ line sẽ vẫn xuất hiện với measure NULL.
     orders = silver_orders_current.filter(~col("Is_Deleted")).join(
-        line_metrics, on="Order_ID", how="left"
+        line_metrics, on="Order_ID", how="inner"
     )
     orders = orders.withColumn("DateKey", date_format(col("Order_Date"), "yyyyMMdd").cast("int"))
     customer_dim = dimensions["dim_customer"]

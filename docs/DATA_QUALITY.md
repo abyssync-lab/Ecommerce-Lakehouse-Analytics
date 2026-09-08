@@ -127,3 +127,6 @@ Test coverage chính nằm ở test_data_quality.py, test_pipeline_invariants.py
 test_reconciliation.py. Spark integration test phải chạy thật trong CI, không
 được skip khi dependency bị thiếu.
 
+DELETE không tìm thấy current-state target được phân loại là `ORPHAN_DELETE`, ghi
+vào quarantine và cộng vào rejected rows; không được âm thầm coi là merge thành
+công.
