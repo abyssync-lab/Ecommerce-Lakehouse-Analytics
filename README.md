@@ -1,715 +1,345 @@
-# GlobalCart Daily Order & Fulfillment Lakehouse
+# Ecommerce Lakehouse Analytics — GlobalCart Order & Fulfillment Platform
 
-GlobalCart là một lakehouse batch hằng ngày cho dữ liệu đơn hàng thương mại điện tử.
-Pipeline tiếp nhận các file thay đổi từ OMS, lưu toàn bộ lịch sử ở Bronze, duy trì
-trạng thái hiện tại ở Silver, xây dựng mô hình phân tích ở Gold và chỉ công bố
-phiên bản đã đối soát cho Power BI.
+End-to-end batch lakehouse xử lý incremental order events từ OMS bằng PySpark + Delta Lake.
+Pipeline đảm bảo idempotency, event ordering, quarantine, reconciliation và atomic publication trước khi dữ liệu được Power BI sử dụng.
 
-Trọng tâm của dự án là tính đúng đắn và khả năng vận hành:
+[![Python Version](https://img.shields.io/badge/Python-3.10%2B-blue.svg)](https://www.python.org/)
+[![PySpark](https://img.shields.io/badge/PySpark-3.5-orange.svg)](https://spark.apache.org/)
+[![Delta Lake](https://img.shields.io/badge/Delta%20Lake-3.x-00ADD8.svg)](https://delta.io/)
+[![Quality](https://img.shields.io/badge/quality-Ruff%20%2B%20Pytest-4c1.svg)](https://docs.pytest.org/)
 
-- xử lý incremental theo nội dung file;
-- idempotency và retry an toàn;
-- không để event cũ ghi đè event mới;
-- quarantine dữ liệu lỗi thay vì làm mất dòng;
-- reconciliation giữa các tầng dữ liệu;
-- certified publication để dữ liệu lỗi không lọt vào dashboard.
+## Project Snapshot
 
-## 1. Phạm vi phiên bản hiện tại
+| Thành phần | Nội dung |
+|---|---|
+| Business problem | Theo dõi order và fulfillment từ OMS, có lịch sử thay đổi và trạng thái hiện tại |
+| Source | Incremental CSV batch từ một OMS |
+| Processing | PySpark |
+| Storage | Delta Lake trên local filesystem hoặc HDFS |
+| Architecture | Medallion: Bronze → Silver → Gold |
+| Modeling | Kimball dimensions, facts và business marts |
+| Quality | Contract validation, quarantine, duplicate accounting, reconciliation |
+| Serving | Certified Gold snapshot qua stable views cho Power BI |
+| Status | End-to-end batch pipeline cho portfolio và kiểm thử vận hành |
 
-### Có trong v1
+## Bài toán và phạm vi ứng dụng (Problem & Scope)
 
-- Một nguồn dữ liệu: OMS xuất CSV theo batch.
-- PySpark và Delta Lake cho data plane.
-- PyYAML cho data contract và business policy.
-- Control plane riêng cho file, pipeline run và publication pointer.
-- Bronze append lịch sử event.
-- Silver current state cho order và order line.
-- Soft delete cho event DELETE.
-- Data quality và quarantine theo error code.
-- Gold run-scoped staging và certified serving.
-- Report đọc từ Gold đã publish.
-- Unit test, Spark integration test và CI quality checks.
+GlobalCart nhận các file thay đổi đơn hàng theo batch, không phải toàn bộ lịch sử:
 
-### Chưa thuộc v1
-
-Kafka, AI/ML, MongoDB, nhiều nguồn dữ liệu, streaming và Airflow production chưa
-phải là dependency của pipeline hiện tại. Airflow chỉ được thêm sau khi CLI và
-end-to-end flow đã ổn định.
-
-## 2. Bài toán nghiệp vụ
-
-OMS không xuất lại toàn bộ lịch sử. Mỗi file chỉ chứa những order line được tạo
-hoặc cập nhật kể từ lần xuất trước:
-
-~~~
-orders_2026-09-07_0100.csv
-orders_2026-09-07_0200.csv
-orders_2026-09-07_0300.csv
-~~~
-
-Ví dụ cùng một order line thay đổi theo thời gian:
-
-| Thời điểm | Order | Line | Trạng thái |
+| Thời điểm | Order | Line | Thay đổi |
 |---|---|---|---|
-| 08:00 | O100 | L1 | Processing |
-| 09:00 | O100 | L1 | Shipped |
-| 15:00 | O100 | L1 | Delivered |
+| 08:00 | O100 | L1 | Tạo mới, Processing |
+| 09:00 | O100 | L1 | Chuyển thành Shipped |
+| 15:00 | O100 | L1 | Chuyển thành Delivered |
 | Hai ngày sau | O100 | L1 | Returned |
 
-Kết quả mong muốn:
+Bronze giữ đủ bốn event để audit và replay. Silver giữ trạng thái hiện tại của
+order và order line. Gold tạo fact ở grain line và grain order để tránh cộng lặp
+chi phí cấp order. Power BI chỉ đọc publication đã qua reconciliation.
 
-- Bronze giữ đủ bốn event để audit.
-- Silver chỉ giữ trạng thái hiện tại là Returned.
-- Gold tính KPI theo trạng thái hiện tại và vẫn truy ngược được về Bronze.
+V1 cố ý chỉ dùng một nguồn OMS CSV và batch processing. Kafka, streaming, AI/ML,
+MongoDB và nhiều nguồn dữ liệu chưa nằm trong phạm vi. Phạm vi này giúp dự án tập
+trung vào correctness, incremental processing, idempotency, data quality và retry.
 
-## 3. Kiến trúc logic
+## Quy trình kỹ thuật duy nhất
 
-Control plane và data plane được tách riêng.
+Sơ đồ này là source of truth cho mã nguồn, cấu hình và báo cáo. Control plane quản
+lý trạng thái; data plane xử lý dữ liệu. Hai phần không dùng chung một bảng để
+đoán trạng thái của nhau.
 
-~~~
-CONTROL PLANE
-  ctl_ingestion_files  -> file hash, file status, retry
-  ctl_pipeline_runs    -> lifecycle, metrics, errors
-  ctl_publications     -> current certified run
+~~~mermaid
+flowchart TD
+    CONTROL["CONTROL PLANE<br/>File Registry | Run Registry | Publication"]
+    LANDING["OMS CSV<br/>Landing"]
+    BRONZE["BRONZE<br/>Raw order-change events"]
+    QUALITY["DATA QUALITY<br/>Contract + row validation"]
+    QUARANTINE["QUARANTINE<br/>Rejected rows + error codes"]
+    SILVER["SILVER<br/>Current order + order-line state"]
+    GOLD["GOLD STAGING<br/>Dimensions + facts + marts"]
+    RECON["RECONCILIATION<br/>PASS / FAIL"]
+    CERTIFIED["CERTIFIED GOLD<br/>Stable serving views"]
+    PBI["POWER BI"]
 
-DATA PLANE
-  landing CSV
-      |
-      v
-  file-level validation
-      |
-      v
-  Bronze: raw change events, append history
-      |                         \
-      |                          -> quarantine + quality metrics
-      v
-  Silver: typed events -> current order/order-line state
-      |
-      v
-  Gold staging: dimensions, facts, marts
-      |
-      v
-  reconciliation
-      |
-      +-- FAIL: current publication không đổi
-      |
-      +-- PASS: cập nhật current_run_id
-                         |
-                         v
-                  serving views -> Power BI
+    CONTROL --> LANDING
+    LANDING --> BRONZE
+    BRONZE --> QUALITY
+    QUALITY --> QUARANTINE
+    QUALITY --> SILVER
+    SILVER --> GOLD
+    GOLD --> RECON
+    RECON -->|PASS| CERTIFIED
+    RECON -->|FAIL| CONTROL
+    CONTROL --> CERTIFIED
+    CERTIFIED --> PBI
 ~~~
 
-Delta chỉ atomic ở từng table. Vì vậy Gold không được ghi trực tiếp vào bảng
-đang đọc bởi BI rồi mới kiểm tra. Mỗi run phải xây dựng staging riêng, chạy
-reconciliation, sau đó mới chuyển publication pointer.
+## Luồng xử lý một batch
 
-## 4. Luồng xử lý một batch
+Một batch đi qua cùng một lifecycle từ CLI, test và CI:
 
-### 4.1. Tạo run và nhận diện file
+1. **Discover và hash file**: tính SHA-256 từ bytes của file, không dùng filename hay URI.
+2. **Register run**: tạo run_id, kiểm tra source_system + source_hash để xử lý replay/retry.
+3. **Validate cấp file**: kiểm tra tồn tại, encoding, header, contract version, cột bắt buộc và file rỗng.
+4. **Append Bronze**: lưu event nguồn cùng metadata; incremental flow không overwrite Bronze.
+5. **Validate cấp dòng**: cast dữ liệu, tạo error_codes, tách valid và quarantine mà không làm mất dòng null.
+6. **Merge Silver**: chọn event mới nhất theo order line, loại exact duplicate, quarantine sequence conflict và bỏ stale event.
+7. **Build Gold staging**: tạo dimensions, facts và marts trong path riêng của run.
+8. **Reconcile và publish**: chỉ đổi publication pointer khi mọi invariant đạt.
 
-Mỗi batch có:
+Chi tiết contract, idempotency, merge và publication nằm trong [docs](docs/).
+README giữ logic cần hiểu khi review; implementation detail được tách theo concern.
 
-~~~
-run_id   = run_20260907_0200_a7f93c
-batch_id = batch_20260907_0200
-~~~
+## Mô hình dữ liệu
 
-source_hash được tính bằng SHA-256 trên bytes thật của file, không phải trên
-filename hoặc URI.
+### Bronze
 
-Khóa idempotency là:
+bronze.ecommerce_raw_delta có grain một change event cho một order line. Giá trị
+nguồn được giữ nguyên dạng raw; metadata gồm run, batch, source hash, row number,
+record hash, contract version và pipeline version.
 
-~~~
-source_system + source_hash
-~~~
+### Silver
 
-| Tình huống | Hành động |
-|---|---|
-| Hash chưa tồn tại | Xử lý batch |
-| Hash đã SUCCESS hoặc PUBLISHED | SKIPPED |
-| Hash từng FAILED | Cho phép retry |
-| Batch ID cũ nhưng hash khác | Fail conflict |
-| Filename khác nhưng hash giống | Skip |
-
-### 4.2. File-level validation
-
-Trước khi ghi Bronze, pipeline kiểm tra:
-
-- file tồn tại và đọc được;
-- file không rỗng;
-- có header;
-- header không có cột trùng;
-- schema version được hỗ trợ;
-- các cột bắt buộc tồn tại.
-
-Lỗi cấu trúc file là lỗi cấp file, ví dụ FILE_SCHEMA_MISMATCH. Không chuyển
-từng dòng vào quarantine nếu toàn bộ file không thể diễn giải đúng.
-
-### 4.3. Ghi Bronze
-
-Grain của Bronze là một dòng thay đổi cho một order line. Giá trị nguồn được giữ
-dưới dạng raw string; việc cast và business validation thực hiện ở Silver.
-
-Metadata chuẩn:
-
-~~~
-_run_id
-_batch_id
-_source_system
-_source_uri
-_source_file
-_source_hash
-_source_row_number
-_ingested_at
-_contract_version
-_pipeline_version
-_record_hash
-~~~
-
-_record_hash dùng để nhận diện exact duplicate. Bronze của incremental run phải
-append. Chế độ overwrite chỉ dành cho bootstrap/reset của môi trường demo.
-
-### 4.4. Validate và merge Silver
-
-Silver thực hiện theo thứ tự:
-
-1. Chuẩn hóa field và cast timestamp, date, integer, decimal.
-2. Sinh danh sách error code cho từng dòng.
-3. Tách valid_df và invalid_df bằng điều kiện null-safe.
-4. Ghi toàn bộ dòng lỗi vào quarantine.
-5. Nhận diện exact duplicate và sequence conflict.
-6. Chọn event thắng trong batch theo timestamp.
-7. Phân loại incoming event so với current state.
-8. MERGE vào Silver current-state.
-
-Với cùng (Order_ID, Order_Line_ID) trong một batch, event có
-Source_Updated_At mới nhất thắng. Nếu timestamp giống nhau nhưng nội dung khác
-nhau, cả nhóm bị quarantine với SEQUENCE_CONFLICT; pipeline không tự ý chọn một
-dòng ngẫu nhiên.
-
-### 4.5. Build Gold, đối soát và publish
-
-Gold được ghi vào vùng run-scoped:
-
-~~~
-gold/_runs/<run_id>/...
-~~~
-
-Sau khi build xong, pipeline chạy reconciliation. Chỉ khi mọi check đạt PASS,
-ctl_publications.current_run_id mới được đổi sang run mới. Các view ổn định ở
-serving chỉ đọc dữ liệu thuộc current run.
-
-Nếu run mới thất bại, Power BI vẫn nhìn thấy run certified trước đó.
-
-## 5. Lifecycle của pipeline run
-
-Lifecycle logic:
-
-~~~
-PROCESSING
-    -> VALIDATED
-    -> SILVER_MERGED
-    -> GOLD_BUILT
-    -> RECONCILED
-    -> READY_TO_PUBLISH
-    -> PUBLISHED
-~~~
-
-Lỗi tại bất kỳ bước nào đều chuyển run sang FAILED, lưu error_code và
-error_message, rồi re-raise lỗi để scheduler biết task thất bại. Không được
-nuốt lỗi ở registry write, quarantine write, quality metrics write hoặc publish.
-
-Nếu publication pointer đã đổi nhưng bước chốt registry thất bại, run được giữ ở
-`CONTROL_FINALIZATION_PENDING`; không ghi đè thành `FAILED` vì Power BI có thể đã
-đọc snapshot mới.
-
-Trong code, orchestration phải có dạng tương đương:
-
-~~~~python
-run = registry.start_run(...)
-
-try:
-    result = execute_pipeline(...)
-    registry.mark_ready_to_publish(run.run_id)
-    publish_gold_run(...)
-    registry.mark_published(run.run_id, ...)
-    return result
-except Exception as exc:
-    registry.mark_failed(run.run_id, exc)
-    raise
-finally:
-    release_resources()
-~~~~
-
-## 6. Data contract
-
-### Contract bootstrap
-
-contracts/ecommerce_order.yaml phục vụ dataset lịch sử hiện có. Dataset cũ có
-thể chưa có Order_Line_ID, Source_Updated_At hoặc Operation đầy đủ.
-
-### Contract incremental v2
-
-contracts/ecommerce_order_change_v2.yaml là contract chính cho event mới:
-
-~~~~yaml
-version: "2.0.0"
-dataset: ecommerce_order_change
-grain: one change event for one order line
-merge_keys:
-  - Order_ID
-  - Order_Line_ID
-sequence_column: Source_Updated_At
-operation_column: Operation
-~~~~
-
-Các field quan trọng:
-
-| Field | Ý nghĩa |
-|---|---|
-| Order_ID | ID đơn hàng |
-| Order_Line_ID | ID ổn định của order line |
-| Product_ID | ID sản phẩm |
-| Source_Updated_At | Thời điểm cập nhật từ OMS |
-| Operation | UPSERT hoặc DELETE |
-| Order_Date | Ngày đặt hàng |
-| Quantity | Số lượng |
-| Unit_Price | Đơn giá |
-| Discount | Tỷ lệ chiết khấu trong [0, 1] |
-| Cost | Giá vốn |
-| Order_Status | Trạng thái nghiệp vụ |
-
-Không dùng các field mutable như price, quantity hoặc product name làm merge key.
-
-Đối với historical bootstrap, pipeline có thể dùng:
-
-~~~
-Order_Line_ID = Order_ID + "-1"
-Product_ID    = sha2(normalized(Product_Name))
-Operation     = UPSERT
-~~~
-
-Đây chỉ là adapter cho dữ liệu cũ. Incremental mode phải nhận Order_Line_ID từ
-upstream; không được tự sinh khóa từ price/quantity.
-
-## 7. Silver data quality và duplicate accounting
-
-### 7.1. Rule cấp dòng
-
-| Rule | Error code | Hành động |
+| Bảng | Grain | Vai trò |
 |---|---|---|
-| Order_ID null | MISSING_ORDER_ID | Quarantine |
-| Order_Line_ID null | MISSING_LINE_ID | Quarantine |
-| Product_ID null với UPSERT | MISSING_PRODUCT_ID | Quarantine |
-| Timestamp cast lỗi | INVALID_UPDATED_AT | Quarantine |
-| Operation không hợp lệ | INVALID_OPERATION | Quarantine |
-| Quantity <= 0 với UPSERT | INVALID_QUANTITY | Quarantine |
-| Price < 0 | INVALID_UNIT_PRICE | Quarantine |
-| Discount ngoài [0, 1] | INVALID_DISCOUNT | Quarantine |
-| Cost < 0 | INVALID_COST | Quarantine |
-| Order date sau updated time | INVALID_EVENT_TIME | Quarantine |
-| Cùng key/timestamp, khác nội dung | SEQUENCE_CONFLICT | Quarantine |
+| silver.ecommerce_clean_delta | Một event hợp lệ | Event history đã chuẩn hóa để audit và incremental merge |
+| silver.silver_orders_current_delta | Một Order_ID | Current order header |
+| silver.silver_order_lines_current_delta | Một (Order_ID, Order_Line_ID) | Current order line, có soft delete |
+| quarantine.rejected_rows | Một dòng bị loại | Dữ liệu lỗi và error_codes để điều tra |
 
-DELETE chỉ bắt buộc Order_ID, Order_Line_ID, Source_Updated_At và Operation.
-Các field về giá, quantity hoặc product không bắt buộc cho delete.
+Measure được chứng nhận ở Silver là Gross_Amount, Discount_Amount,
+Net_Line_Amount, Cost_Amount và Gross_Profit. Revenue hoặc Profit từ nguồn, nếu có,
+được đổi tên thành Source_Revenue và Source_Profit để không nhầm với measure tính lại.
 
-### 7.2. Null-safe accounting
+### Gold
 
-Không được tách valid/invalid bằng filter(condition) và filter(~condition)
-nếu condition có thể là NULL. Dòng null có thể biến mất khỏi cả hai nhánh.
-
-Thay vào đó, pipeline tạo error_codes rồi lọc các phần tử null:
-
-~~~~python
-error_codes = expr("filter(error_codes, x -> x is not null)")
-valid_df = evaluated.filter(size("error_codes") == 0)
-invalid_df = evaluated.filter(size("error_codes") > 0)
-~~~~
-
-Accounting của batch phải minh bạch:
-
-~~~
-raw_rows
-  = exact_duplicate_rows
-  + rejected_rows
-  + valid_event_rows
-~~~
-
-Nếu trong cùng batch có nhiều event hợp lệ cho một line:
-
-~~~
-valid_event_rows
-  = winning_events
-  + superseded_rows
-~~~
-
-Không dùng công thức này để so sánh toàn bộ Bronze history với current-state
-Silver.
-
-### 7.3. Ba loại duplicate/event
-
-- **Exact duplicate:** cùng _record_hash; giữ một event và đếm phần còn lại.
-- **Sequence conflict:** cùng key và timestamp nhưng nội dung khác; quarantine cả
-  nhóm.
-- **Multiple versions:** cùng line nhưng timestamp khác; không phải duplicate,
-  giữ toàn bộ ở Bronze và chọn event mới nhất để merge current state.
-
-## 8. Silver current-state model
-
-### silver_orders_current
-
-Grain: một dòng cho mỗi Order_ID.
-
-Các field chính:
-
-~~~
-Order_ID, Order_Date, Customer_ID, Customer_Segment,
-Order_Status, Payment_Method, Shipping_Method,
-Shipping_Cost, Shipping_Days, Region, Country,
-Source_Updated_At, Is_Deleted, Record_Hash,
-Last_Run_ID, Last_Source_Hash, Created_At, Updated_At
-~~~
-
-Field cấp order không được cộng lặp theo số line.
-
-### silver_order_lines_current
-
-Grain: một dòng cho mỗi (Order_ID, Order_Line_ID).
-
-Các field tính toán:
-
-~~~
-Gross_Amount      = Quantity * Unit_Price
-Discount_Amount   = Gross_Amount * Discount_Rate
-Net_Line_Amount   = Gross_Amount - Discount_Amount
-Gross_Profit      = Net_Line_Amount - Cost_Amount
-~~~
-
-Nếu nguồn có Revenue hoặc Profit, lưu thành Source_Revenue và Source_Profit để
-đối chiếu với các field certified được tính lại.
-
-DELETE được áp dụng dưới dạng soft delete bằng Is_Deleted = true. Gold chỉ lấy
-active rows. Delete không tìm thấy current row được đếm là ORPHAN_DELETE.
-
-### Phân loại trước khi MERGE
-
-| Điều kiện | Metric |
-|---|---|
-| Target không tồn tại, UPSERT | inserted_rows |
-| Target tồn tại, incoming mới hơn | updated_rows |
-| Hash giống target | unchanged_rows |
-| Incoming cũ hơn target | stale_rows |
-| Incoming mới hơn, DELETE | deleted_rows |
-| DELETE không có target | orphan_delete_rows |
-
-MERGE luôn join bằng stable key (Order_ID, Order_Line_ID) và chỉ update khi
-Source_Updated_At mới hơn.
-
-## 9. Gold semantic model
-
-Mô hình Gold hướng đến constellation gồm hai fact:
-
-### Dimensions
+**Dimensions**
 
 - dim_date
 - dim_product
-- dim_customer — SCD Type 2 cho các thuộc tính cần lịch sử
-- dim_location, dim_payment, dim_shipping, dim_order_status — các dimension
-  compatibility hiện đang được dùng bởi fact builder; có thể gộp thành
-  `dim_geography` và `dim_order_context` ở một PR schema migration riêng.
+- dim_customer, hỗ trợ SCD Type 2 khi bật ECOMMERCE_USE_SCD2=true
+- dim_location, chứa Region và Country
+- dim_payment, dim_shipping và dim_order_status cho các khóa nghiệp vụ tương thích
 
-### fact_sales_line
+**Facts**
 
-Grain: một active order line hiện hành.
+- fact_sales_line: một row cho order line hiện hành; SalesKey ổn định theo business key.
+- fact_order_fulfillment: một row cho order; shipping cost chỉ xuất hiện một lần ở order grain.
 
-Các measure chính:
+**Certified marts**
 
-~~~
-Quantity
-Gross_Amount
-Discount_Amount
-Net_Line_Amount
-Cost_Amount
-Gross_Profit
-Publication_Run_ID
-~~~
+- mart_executive_daily
+- mart_product_performance
+- mart_geography_performance
+- mart_fulfillment_sla
+- mart_customer_rfm
+- mart_product_abc
 
-Sales key phải ổn định theo (Order_ID, Order_Line_ID), không dùng row_number()
-trên toàn bảng để cấp lại key sau mỗi lần chạy.
+Policy cho revenue, return, RFM và ABC được khai báo trong
+[contracts/business_metrics.yaml](contracts/business_metrics.yaml), không hard-code
+rải rác trong report.
 
-### fact_order_fulfillment
+## Data Quality Results
 
-Grain: một active order.
+Các invariant dưới đây là tiêu chí publish. Test tương ứng nằm trong tests/ và
+được chạy trong CI khi Spark/Delta đã được cài.
 
-Các measure chính:
+| Check | Expected result |
+|---|---|
+| Duplicate ingestion | 0 duplicated accepted events sau replay cùng content hash |
+| Orphan row loss | 0; dòng lỗi phải vào quarantine hoặc được ghi nhận là duplicate |
+| Raw accounting | raw = valid + rejected + exact_duplicate |
+| Failed Gold run published | 0; run lỗi không đổi current_run_id |
+| Old event ghi đè event mới | 0; stale event chỉ tăng metric stale_rows |
+| Silver/Fact financial reconciliation | SUM(Net_Line_Amount) bằng nhau theo cùng policy |
+| Current-state grain | Không trùng order và không trùng (Order_ID, Order_Line_ID) |
+| SCD2 integrity | Tối đa một customer version hiện hành, không có khoảng chồng lấn |
 
-~~~
-Line_Count
-Total_Quantity
-Order_Value
-Shipping_Cost
-Shipping_Days
-SLA_Days
-Is_SLA_Breached
-Is_Delivered
-Is_Returned
-Is_Cancelled
-Publication_Run_ID
-~~~
+Ngưỡng reject mặc định là 5%. Có thể cấu hình bằng ECOMMERCE_MAX_REJECT_RATE;
+vượt ngưỡng sẽ làm batch thất bại trước publication.
 
-Order_Value phải tổng hợp từ Silver order lines, không lấy một field order-level
-bị lặp trên từng line.
+## Certified publication cho Power BI
 
-### SCD Type 2
+Delta Lake atomic theo từng table, không atomic cho toàn bộ Gold schema. Pipeline:
 
-Customer dimension chỉ theo dõi các thuộc tính cần lịch sử, ví dụ
-Customer_Segment và Customer_Gender. Attribute_Hash xác định version:
+1. Ghi dimensions, facts và marts vào gold/_runs/<run_id>.
+2. Sau reconciliation, ghi dữ liệu vào serving và đổi pointer trong
+   ctl_publications_delta.
 
-~~~
-Order timestamp >= Valid_From
-AND Order timestamp < Valid_To
-~~~
+Các view trong database serving chỉ trả row có Publication_Run_ID bằng
+current_run_id. Nếu run mới lỗi, run cũ vẫn là bản Power BI nhìn thấy.
 
-Khi attribute hash đổi, đóng version hiện tại và mở version mới. Late-arriving
-event nằm giữa hai version phải rebuild lịch sử của customer đó, không rebuild
-toàn bộ dimension.
+Report artifact hiện có tại [BI_BIG .pbix](<BI_BIG .pbix>). Code sinh báo cáo mặc
+định đọc serving.gold_sales_enriched từ publication hiện hành. Tùy chọn --source csv
+chỉ dành cho validation độc lập, không phải nguồn dashboard certified. Repo hiện
+chưa có screenshot dashboard được commit nên không nhúng ảnh giả.
 
-## 10. Business metrics
+## Cấu trúc thư mục dự án (Project Structure)
 
-Chính sách KPI đặt trong contracts/business_metrics.yaml, không rải cứng trong
-nhiều mart.
-
-Các policy cần thống nhất:
-
-- recognized revenue: status Delivered;
-- return rate: Returned / (Delivered + Returned);
-- RFM: chỉ dùng order Delivered;
-- profit margin: SUM(Gross_Profit) / SUM(Net_Line_Amount);
-- AOV: delivered revenue / delivered orders.
-
-Không tính average của từng phần trăm line rồi mới average tiếp ở cấp report.
-
-Pipeline hiện dùng sáu mart certified này; `build_all_marts` vẫn tồn tại như API
-tương thích cho các consumer cũ:
-
-1. mart_executive_daily
-2. mart_product_performance
-3. mart_geography_performance
-4. mart_fulfillment_sla
-5. mart_customer_rfm
-6. mart_product_abc
-
-Không coi việc tạo nhiều bảng groupBy đơn giản là hoàn thành data mart.
-
-## 11. Reconciliation và certified publication
-
-Reconciliation được chia thành các nhóm độc lập:
-
-### Batch accounting
-
-Kiểm tra raw, duplicate, rejected và valid của đúng batch đang chạy. Với
-incremental run, không lấy tổng toàn bộ Bronze history để so sánh với current
-state.
-
-### Silver current state
-
-- Không trùng Order_ID.
-- Không trùng (Order_ID, Order_Line_ID).
-- Mọi active line có order header.
-- Không có active line thuộc deleted order.
-- Incoming stale không làm giảm Source_Updated_At hiện tại.
-
-### Fact và tài chính
-
-- Số active Silver lines khớp fact_sales_line.
-- Số active Silver orders khớp fact_order_fulfillment.
-- Tổng Silver.Net_Line_Amount bằng tổng FactSales.Net_Line_Amount.
-- Delivered revenue giữa Silver, fact và executive mart khớp theo cùng policy.
-
-### Dimension integrity
-
-- Foreign key không null hoặc trỏ về unknown key 0.
-- Mỗi natural key Type 1 chỉ có một row.
-- Mỗi customer chỉ có một Is_Current = 1.
-- Các khoảng SCD2 không chồng lấn.
-- Temporal join của fact match đúng một customer version.
-
-### Publication
-
-- Tất cả Gold tables có cùng Publication_Run_ID.
-- Đủ các table bắt buộc.
-- Không có row count bất thường bằng 0.
-- current_run_id chỉ đổi sau khi mọi check PASS.
-
-## 12. Cấu trúc repository
-
-Repository hiện vẫn dùng package dưới SourceCode/lakehouse trong lúc refactor;
-chưa chuyển toàn bộ sang src/globalcart.
-
-~~~
-GlobalEcommerceBigData/
+~~~text
+Ecommerce-Lakehouse-Analytics/
 ├── SourceCode/
 │   ├── lakehouse/
-│   │   ├── pipeline.py           # orchestration
-│   │   ├── ingestion.py          # file read, hash, Bronze metadata
-│   │   ├── file_manifest.py      # ctl_ingestion_files và Bronze commit ledger
-│   │   ├── registry.py            # run lifecycle và metrics
-│   │   ├── publication.py         # staging, serving, pointer
-│   │   ├── silver.py              # quality, dedup, current state
-│   │   ├── dimensions.py          # dimensions và SCD2
-│   │   ├── marts.py               # facts, certified marts và API legacy
-│   │   ├── reconciliation.py      # data quality checks
-│   │   └── contracts/             # contract loader/evaluator
-│   ├── SparkEcommerceAnalysis.py  # CLI entry point hiện tại
-│   ├── project_cli.py             # project utilities
-│   └── generate_portfolio_report.py
-├── contracts/
-│   ├── ecommerce_order.yaml
-│   ├── ecommerce_order_change_v2.yaml
-│   ├── business_metrics.yaml
-│   └── shipping_sla.yaml
-├── Data/
-├── tests/                        # Spark, contract, reconciliation và CLI tests
-├── .github/workflows/quality.yml
+│   │   ├── ingestion.py          # đọc CSV, hash và append Bronze
+│   │   ├── file_manifest.py      # registry theo source hash
+│   │   ├── registry.py           # lifecycle của pipeline run
+│   │   ├── silver.py             # quality, current-state và merge helpers
+│   │   ├── dimensions.py         # dimensions và SCD2
+│   │   ├── marts.py              # facts, semantic base và marts
+│   │   ├── reconciliation.py     # batch/current-state/financial checks
+│   │   ├── publication.py        # staging, pointer và stable views
+│   │   └── storage.py            # local/HDFS path và Delta write helpers
+│   ├── SparkEcommerceAnalysis.py # entrypoint bootstrap/incremental
+│   ├── generate_portfolio_report.py
+│   ├── project_cli.py             # nhóm lệnh tiện ích local
+│   └── validate_input.py
+├── contracts/                     # data contract và business policy
+├── Data/                          # seed và sample batches
+├── docs/                          # thiết kế chi tiết theo từng concern
+├── tests/                         # unit, integration và invariant tests
+├── .github/workflows/quality.yml  # CI có Spark + Delta thật
+├── BI_BIG .pbix                   # Power BI artifact hiện có
 ├── requirements.txt
-└── README.md
+└── pyproject.toml
 ~~~
 
-## 13. Cài đặt môi trường
+Một số script legacy như MongoDB connector và Thrift server vẫn còn để giữ tương
+thích với repository cũ, nhưng không được gọi bởi v1 batch pipeline.
 
-Yêu cầu đề xuất:
+## Hướng dẫn cài đặt (Installation)
 
-- Python 3.10 hoặc 3.11;
-- Java 17 cho Spark;
-- PySpark và Delta Lake tương thích;
-- PyYAML;
-- Pytest và Ruff.
+Yêu cầu:
 
-Cài dependencies:
+- Python 3.10 trở lên
+- Java 17 cho Spark local
+- PySpark 3.5.x và Delta Lake 3.x
 
-~~~~powershell
+~~~powershell
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install --upgrade pip
 python -m pip install -r requirements.txt
-~~~~
+~~~
 
-Biến môi trường quan trọng:
+Local mode mặc định ghi vào Output/lakehouse:
 
 ~~~powershell
 $env:ECOMMERCE_USE_LOCAL_STORAGE = "true"
-$env:ECOMMERCE_MAX_REJECT_RATE = "0.05"
+$env:SPARK_LOCAL_IP = "127.0.0.1"
+$env:PYSPARK_PYTHON = "python"
 ~~~
 
-Mặc định, batch có hơn 5% dòng bị reject sẽ FAILED và không được publish.
+Để chạy HDFS, đặt ECOMMERCE_USE_LOCAL_STORAGE=false và cấu hình ECOMMERCE_HDFS_BASE.
 
-Kiểm tra nhanh:
+## Hướng dẫn chạy thử nghiệm (Running the pipeline)
 
-~~~~powershell
-python -m compileall SourceCode
-ruff check SourceCode tests
-~~~~
+### Bootstrap
 
-## 14. Chạy pipeline local
-
-### Bootstrap dữ liệu lịch sử
-
-~~~~powershell
+~~~powershell
+python SourceCode/validate_input.py Data/EcommerceSalesDataset.csv
 python SourceCode/SparkEcommerceAnalysis.py --input Data/EcommerceSalesDataset.csv
-~~~~
+~~~
 
-Bootstrap dùng adapter cho dataset lịch sử, tạo Silver/Gold ban đầu và publish
-run đầu tiên.
+Bootstrap tạo Bronze history, Silver current state, Gold staging và publication đầu tiên.
 
-### Chạy incremental batch
+### Incremental batch
 
-~~~~powershell
-python SourceCode/SparkEcommerceAnalysis.py --incremental --input Data/sample_batches/batch_001.csv --batch-id batch_20260907_0200
-~~~~
+~~~powershell
+python SourceCode/SparkEcommerceAnalysis.py `
+  --incremental `
+  --input Data/sample_batches/batch_001.csv `
+  --batch-id batch_20260907_0200
+~~~
 
-Incremental input phải theo contract v2 và phải có Order_Line_ID từ upstream.
+Incremental bắt buộc dùng Order_Line_ID ổn định từ upstream. Dataset historical
+bootstrap có thể dùng adapter sinh ID, nhưng không được suy diễn ID từ price hoặc
+quantity cho batch thực tế.
 
-### Sinh report từ certified Gold
+### Replay và retry
 
-~~~~powershell
+Chạy lại cùng file để kiểm tra idempotency:
+
+~~~powershell
+python SourceCode/SparkEcommerceAnalysis.py `
+  --incremental `
+  --input Data/sample_batches/batch_001.csv `
+  --batch-id batch_20260907_0200
+~~~
+
+Nếu content hash đã được publish, run được đánh dấu SKIPPED, Bronze không append
+thêm và publication pointer không đổi. Nếu run trước đó FAILED, pipeline có thể
+retry với cùng source hash.
+
+### Sinh báo cáo
+
+~~~powershell
 python SourceCode/generate_portfolio_report.py --source published
-~~~~
-
---source published là đường chạy chuẩn. Đọc CSV trực tiếp chỉ được dùng cho
-independent validation hoặc so sánh legacy:
-
-~~~~powershell
-python SourceCode/generate_portfolio_report.py --source csv
-~~~~
-
-Report không được dùng CSV raw để giả lập kết quả lakehouse trong demo chính.
-
-## 15. Chạy test và CI
-
-### Local
-
-~~~~powershell
-python -m pytest -v --basetemp=./scratch/pytest_temp
-~~~~
-
-### CI
-
-CI có hai nhóm kiểm tra:
-
-1. Fast checks: Ruff, YAML validation và unit tests.
-2. Spark integration: Java, PySpark, Delta, bootstrap nhỏ, incremental update,
-   replay và report từ published Gold.
-
-Integration test không được pytest.skip chỉ vì thiếu PySpark. Nếu dependency
-không cài được, CI phải fail để phản ánh môi trường không hợp lệ.
-
-## 16. Demo bắt buộc
-
-Nên chuẩn bị các batch nhỏ để chứng minh từng invariant:
-
-~~~
-000_bootstrap.csv
-001_new_orders.csv
-002_status_updates.csv
-003_returns_and_cancellations.csv
-004_invalid_records.csv
-005_late_and_duplicate_events.csv
 ~~~
 
-Kịch bản cần thể hiện:
+Mặc định report đọc Gold đã publish. Dùng --source csv chỉ khi cần validation
+độc lập với lakehouse.
 
-1. Bootstrap tạo current state và publication đầu tiên.
-2. Replay cùng file trả SKIPPED, không tăng Bronze/Silver và không đổi
-   publication.
-3. Update cùng line với timestamp mới làm updated_rows = 1.
-4. Event cũ làm tăng stale_rows, không thay đổi Silver.
-5. Record lỗi đi vào quarantine, không biến mất.
-6. Cố tình làm reconciliation fail; current publication vẫn trỏ về run trước.
+### Nhóm lệnh local
 
-## 17. Mục tiêu vận hành
+~~~powershell
+python SourceCode/project_cli.py --help
+python SourceCode/project_cli.py check
+python SourceCode/project_cli.py reconcile
+~~~
 
-Đây là các mục tiêu cần benchmark và chứng minh bằng test/monitoring, không phải
-con số được mặc định coi là đã đạt:
+Các lệnh demo Delta hoặc connector legacy không thuộc data path chính của v1.
 
-- lịch chạy lúc 02:00 mỗi ngày;
-- xử lý batch 1 triệu dòng dưới 15 phút;
-- không nạp lại cùng một file;
-- không để event cũ ghi đè event mới;
-- quarantine đầy đủ dòng lỗi;
-- tỷ lệ quarantine trên 5% làm batch thất bại;
-- sai lệch doanh thu Silver/Gold bằng 0;
-- retry sau sự cố không tạo duplicate;
-- Power BI không nhìn thấy Gold chưa reconciliation.
+## Kiểm tra chất lượng code
 
-## 18. Thứ tự refactor tiếp theo
+~~~powershell
+python -m ruff check SourceCode tests scripts
+python -m compileall -q SourceCode
+python -m pytest -q
+~~~
 
-Các thay đổi nên tách thành PR nhỏ, mỗi PR có test và invariant riêng:
+CI trong .github/workflows/quality.yml cài Java 17, PySpark và Delta Lake, sau đó
+chạy Ruff, toàn bộ test, validate contract, bootstrap certified Gold và report
+validation. Integration test không được skip khi thiếu PySpark trong CI.
 
-1. Bổ sung test Spark cho file-ledger retry sau Bronze commit.
-2. Hoàn thiện reconciliation riêng cho order header, order line và fact order.
-3. Bổ sung unknown member key `0` và kiểm tra foreign key bắt buộc.
-4. Bổ sung test late-arriving SCD2 và publication finalization pending.
-5. Chỉ sau đó mới thêm Airflow DAG gọi cùng CLI entry point.
-6. Cập nhật Power BI và portfolio report chỉ đọc certified Gold serving.
+## Tài liệu thiết kế
 
-## 19. Thông điệp chính của dự án
+| Tài liệu | Nội dung |
+|---|---|
+| [DATA_CONTRACT.md](docs/DATA_CONTRACT.md) | Contract v2, bootstrap adapter, file-level và row-level rules |
+| [DATA_QUALITY.md](docs/DATA_QUALITY.md) | Error codes, quarantine, duplicate accounting và reconciliation |
+| [INCREMENTAL_PROCESSING.md](docs/INCREMENTAL_PROCESSING.md) | Hash idempotency, registry lifecycle, retry và stale events |
+| [SILVER_MERGE.md](docs/SILVER_MERGE.md) | Event winner, Delta MERGE, current-state và soft delete |
+| [GOLD_MODEL.md](docs/GOLD_MODEL.md) | Dimensions, facts, SCD2, KPI policy và run-scoped staging |
+| [OPERATIONS.md](docs/OPERATIONS.md) | Cài đặt, chạy batch, failure handling, monitoring và CI |
+
+Các tài liệu cũ trong docs/ được giữ như bối cảnh portfolio; sáu tài liệu trên là
+bộ hướng dẫn bám sát implementation hiện tại.
+
+## Trạng thái kiểm chứng hiện tại
+
+Đã kiểm tra trong môi trường phát triển:
+
+- Ruff check cho SourceCode, tests, scripts: đạt.
+- Ruff format check cho các module lakehouse đã chỉnh: đạt.
+- Compile toàn bộ SourceCode: đạt.
+- YAML contracts: parse thành công.
+- Nhóm unit/contract/CLI/portfolio tests không cần Spark: đạt.
+
+Full Spark/Delta integration cần runtime có Java, PySpark và delta-spark. CI đã cấu
+hình đúng dependency; nếu môi trường chưa cài Spark thì đó là lỗi môi trường, không
+được biến thành pytest.skip trong integration job.
+
+## Định hướng sau v1
+
+Chỉ mở rộng sau khi các invariant của v1 ổn định:
+
+1. Chuẩn hóa package src/globalcart nhưng giữ entrypoint tương thích.
+2. Thêm Airflow DAG mỏng chỉ gọi package entrypoint, không chứa business logic.
+3. Bổ sung monitoring/alerting dựa trên control plane.
+4. Khi có yêu cầu nghiệp vụ thật mới đánh giá thêm nguồn dữ liệu hoặc streaming.
+
+
+
+## Thông điệp chính của dự án
 
 Đây không phải dự án chỉ đọc CSV rồi groupBy để tạo biểu đồ. Giá trị của
 GlobalCart nằm ở việc chứng minh một data pipeline thực tế có thể:
