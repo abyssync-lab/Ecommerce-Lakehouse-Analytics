@@ -20,6 +20,8 @@ auto_set_spark_home_env()
 os.environ.setdefault("HADOOP_USER_NAME", "hadoop")
 if SETTINGS.use_local_storage and not os.environ.get("SPARK_LOCAL_IP"):
     os.environ["SPARK_LOCAL_IP"] = "127.0.0.1"
+if SETTINGS.use_local_storage and not os.environ.get("SPARK_LOCAL_HOSTNAME"):
+    os.environ["SPARK_LOCAL_HOSTNAME"] = "localhost"
 
 from pyspark.sql import SparkSession
 from pyspark.sql.functions import array, col, current_timestamp, lit, row_number
@@ -43,6 +45,7 @@ from .publication import persist_gold_staging, publish_gold_run
 from .reconciliation import run_full_reconciliation
 from .registry import BatchRegistry
 from .silver import (
+    build_silver_current_events,
     build_silver_order_lines_current,
     build_silver_orders_current,
     clean_and_enrich_silver,
@@ -80,13 +83,27 @@ def _enforce_reject_rate(
 
 
 def _customer_history_source(spark: SparkSession, fallback_df: Any, use_scd2: bool) -> Any | None:
-    """Lấy lịch sử event hợp lệ từ Silver để SCD2 không dùng dòng lỗi."""
+    """Chuẩn hóa lại Bronze history để SCD2 không mất late customer events.
+
+    Silver current-state chỉ giữ version thắng cuối cùng, nên không đủ để dựng
+    khoảng thời gian SCD2. Bronze là nguồn audit duy nhất chứa toàn bộ event; các
+    dòng lỗi được lọc bằng cùng Silver quality rules nhưng không ghi thêm metrics
+    hoặc quarantine trong lúc rebuild dimension.
+    """
     if not use_scd2:
         return None
-    silver_path = SETTINGS.get_storage_path(SETTINGS.silver_delta)
-    if not DeltaTable.isDeltaTable(spark, silver_path):
+    bronze_path = SETTINGS.get_storage_path(SETTINGS.bronze_delta)
+    if not DeltaTable.isDeltaTable(spark, bronze_path):
         return fallback_df
-    history = spark.read.format("delta").load(silver_path)
+    bronze_history = spark.read.format("delta").load(bronze_path)
+    history = clean_and_enrich_silver(
+        bronze_history,
+        quarantine_path=None,
+        run_id="scd2_history_rebuild",
+        batch_id="scd2_history_rebuild",
+        allow_line_id_fallback=True,
+        record_quality_metrics=False,
+    )
     if "Operation" in history.columns:
         history = history.filter(col("Operation") != "DELETE")
     if "Customer_ID" not in history.columns:
@@ -206,7 +223,15 @@ def run_pipeline(
         input_path if input_path is not None else (config.input_path if config else None)
     )
     source_uri = effective_input or SETTINGS.get_input_path()
-    source_hash = calculate_source_hash(source_uri)
+    source_hash_error: Exception | None = None
+    try:
+        source_hash = calculate_source_hash(source_uri)
+    except Exception as exc:
+        # Không thể hash file thì không được giả làm content hash. Sentinel này
+        # chỉ giúp ghi nhận FAILED trong control plane và luôn bị loại khỏi
+        # idempotency lookup; khi file xuất hiện lại sẽ tính hash thật.
+        source_hash = "hash_unavailable"
+        source_hash_error = exc
     run_id = config.run_id if config and config.run_id else f"run_{uuid.uuid4().hex[:8]}"
     batch_id = config.batch_id if config and config.batch_id else f"batch_{uuid.uuid4().hex[:8]}"
 
@@ -221,39 +246,44 @@ def run_pipeline(
     registry = BatchRegistry(spark)
     clean_df = None
     pipeline_succeeded = False
-
-    # Bootstrap cũng phải replay-safe. Chỉ môi trường demo/reset mới được phép
-    # overwrite một source hash đã certified; run bình thường không được nạp lại.
-    if registry.is_batch_processed(source_hash):
-        previous = registry.find_by_source_hash(source_hash)
-        LOGGER.warning(
-            "Source hash %s đã được publish ở run=%s; bỏ qua bootstrap replay.",
-            source_hash[:10],
-            previous["run_id"] if previous else "unknown",
-        )
-        return PipelineRunResult(
-            run_id=run_id,
-            batch_id=batch_id,
-            status="SKIPPED",
-            bronze_rows=0,
-            silver_rows=0,
-            quarantine_rows=0,
-            duplicate_rows=0,
-            reconciliation_passed=True,
-            spark=spark,
-        )
-
-    registry.start_run(
-        run_id=run_id,
-        batch_id=batch_id,
-        source_uri=source_uri,
-        source_hash=source_hash,
-        source_size_bytes=calculate_source_size(source_uri),
-        pipeline_version="1.1.0",
-        contract_version="1.0.0",
-    )
+    run_started = False
 
     try:
+        # Bootstrap cũng phải replay-safe. Chỉ môi trường demo/reset mới được phép
+        # overwrite một source hash đã certified; run bình thường không được nạp lại.
+        if registry.is_batch_processed(source_hash):
+            previous = registry.find_by_source_hash(source_hash)
+            LOGGER.warning(
+                "Source hash %s đã được publish ở run=%s; bỏ qua bootstrap replay.",
+                source_hash[:10],
+                previous["run_id"] if previous else "unknown",
+            )
+            return PipelineRunResult(
+                run_id=run_id,
+                batch_id=batch_id,
+                status="SKIPPED",
+                bronze_rows=0,
+                silver_rows=0,
+                quarantine_rows=0,
+                duplicate_rows=0,
+                reconciliation_passed=True,
+                spark=spark,
+            )
+
+        registry.start_run(
+            run_id=run_id,
+            batch_id=batch_id,
+            source_uri=source_uri,
+            source_hash=source_hash,
+            source_size_bytes=calculate_source_size(source_uri),
+            pipeline_version="1.1.0",
+            contract_version="1.0.0",
+        )
+        run_started = True
+
+        if source_hash_error is not None:
+            raise source_hash_error
+
         # 1. Bronze: đọc file, validate schema và append raw event kèm lineage.
         LOGGER.info("--- 1. INGESTION & 2. BRONZE LAYER ---")
         bronze_path = SETTINGS.get_storage_path(SETTINGS.bronze_delta)
@@ -318,6 +348,7 @@ def run_pipeline(
         # giữ tương thích ngược trong giai đoạn chuyển đổi source code.
         silver_orders_current = build_silver_orders_current(clean_df)
         silver_order_lines_current = build_silver_order_lines_current(clean_df)
+        current_silver = build_silver_current_events(clean_df)
         save_and_verify_delta(
             silver_orders_current,
             SETTINGS.silver_orders_delta,
@@ -336,11 +367,11 @@ def run_pipeline(
         LOGGER.info("--- 4. GOLD LAYER - STAR SCHEMA (SCD2=%s) ---", effective_scd2)
         dimensions = build_all_dimensions(
             spark,
-            clean_df,
+            current_silver,
             use_scd2=effective_scd2,
             customer_history_df=_customer_history_source(spark, clean_df, effective_scd2),
         )
-        fact_sales = build_fact_sales(clean_df, dimensions)
+        fact_sales = build_fact_sales(current_silver, dimensions)
         fact_order_fulfillment = build_fact_order_fulfillment(
             silver_orders_current,
             silver_order_lines_current,
@@ -372,7 +403,7 @@ def run_pipeline(
         # 4. Chỉ certification sau reconciliation; mọi exception đều đi qua FAILED.
         LOGGER.info("--- 6. DATA RECONCILIATION & CERTIFICATION GATE ---")
         recon_report = run_full_reconciliation(
-            clean_df=clean_df,
+            clean_df=current_silver,
             fact_sales=fact_sales,
             mart_overview=gold_marts["mart_executive_daily"],
             dim_customer=dimensions["dim_customer"],
@@ -380,6 +411,7 @@ def run_pipeline(
             duplicate_count=duplicate_rows,
             invalid_count=quarantine_rows,
             run_id=run_id,
+            valid_count=silver_rows,
             silver_orders_current=silver_orders_current,
             silver_order_lines_current=silver_order_lines_current,
             fact_order_fulfillment=fact_order_fulfillment,
@@ -431,17 +463,20 @@ def run_pipeline(
         )
     except Exception as exc:
         # Registry write failure phải được giữ nguyên để operator biết control plane hỏng.
-        current = registry.find_by_run_id(run_id)
-        if current is None or current["status"] != "CONTROL_FINALIZATION_PENDING":
-            registry.mark_failed(
-                run_id,
-                exc,
-                error_code=(
-                    "RECONCILIATION_FAILED"
-                    if isinstance(exc, PipelineCertificationError)
-                    else "PIPELINE_FAILED"
-                ),
-            )
+        if run_started:
+            current = registry.find_by_run_id(run_id)
+            if current is None or current["status"] != "CONTROL_FINALIZATION_PENDING":
+                registry.mark_failed(
+                    run_id,
+                    exc,
+                    error_code=(
+                        "RECONCILIATION_FAILED"
+                        if isinstance(exc, PipelineCertificationError)
+                        else "SOURCE_FILE_NOT_FOUND"
+                        if isinstance(exc, FileNotFoundError)
+                        else "PIPELINE_FAILED"
+                    ),
+                )
         raise
     finally:
         if clean_df is not None:
@@ -503,8 +538,18 @@ def run_incremental_pipeline(
 
     # Idempotency kiểm tra trước mọi side effect. Cùng content hash đã PUBLISHED/SUCCESS
     # phải trả về SKIPPED, còn FAILED vẫn được phép retry.
-    if registry.is_batch_processed(shash):
+    try:
+        already_processed = registry.is_batch_processed(shash)
+    except Exception:
+        # Nếu control plane không đọc được, không được để Spark do function sở hữu
+        # chạy ngầm sau khi caller đã nhận lỗi.
+        if owns_spark:
+            spark.stop()
+        raise
+    if already_processed:
         LOGGER.warning("Batch %s (Hash: %s) ĐÃ XỬ LÝ THÀNH CÔNG TRƯỚC ĐÓ. Bỏ qua.", bid, shash[:10])
+        if owns_spark:
+            spark.stop()
         return PipelineRunResult(
             run_id=run_id,
             batch_id=bid,
@@ -521,6 +566,7 @@ def run_incremental_pipeline(
     clean_batch = None
     manifest_registered = False
     bronze_committed = False
+    run_started = False
     try:
         raw_count = new_batch_df.count()
         registry.start_run(
@@ -533,6 +579,7 @@ def run_incremental_pipeline(
             pipeline_version="1.0.0",
             contract_version="2.0.0",
         )
+        run_started = True
 
         # Đăng ký file trước file-level validation để schema lỗi vẫn xuất hiện
         # trong control plane và có thể phân biệt với file chưa từng được phát hiện.
@@ -927,7 +974,7 @@ def run_incremental_pipeline(
         # 4. Refresh Gold core và marts từ current state Silver.
         LOGGER.info("--- 4. REFRESH GOLD CORE & MARTS TỪ SILVER (SCD2=%s) ---", effective_scd2)
         full_silver = spark.read.format("delta").load(silver_path)
-        active_silver = full_silver.filter("Is_Deleted = false OR Is_Deleted IS NULL")
+        active_silver = build_silver_current_events(full_silver)
         dimensions = build_all_dimensions(
             spark,
             active_silver,
@@ -1021,17 +1068,18 @@ def run_incremental_pipeline(
         # Bất kỳ lỗi nào ở Bronze/Silver/Gold/Reconciliation đều phải làm control plane
         # chuyển FAILED để lần retry sau được phân biệt với một run đang chạy dở.
         try:
-            current = registry.find_by_run_id(run_id)
-            if current is None or current["status"] != "CONTROL_FINALIZATION_PENDING":
-                registry.mark_failed(
-                    run_id,
-                    exc,
-                    error_code=(
-                        "RECONCILIATION_FAILED"
-                        if isinstance(exc, PipelineCertificationError)
-                        else "PIPELINE_FAILED"
-                    ),
-                )
+            if run_started:
+                current = registry.find_by_run_id(run_id)
+                if current is None or current["status"] != "CONTROL_FINALIZATION_PENDING":
+                    registry.mark_failed(
+                        run_id,
+                        exc,
+                        error_code=(
+                            "RECONCILIATION_FAILED"
+                            if isinstance(exc, PipelineCertificationError)
+                            else "PIPELINE_FAILED"
+                        ),
+                    )
         finally:
             if manifest_registered and not bronze_committed:
                 manifest.mark_failed(

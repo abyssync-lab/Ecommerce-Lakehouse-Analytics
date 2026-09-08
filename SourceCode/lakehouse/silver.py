@@ -7,12 +7,12 @@ from typing import Any
 
 from pyspark.sql.functions import (
     array,
-    array_remove,
     coalesce,
     col,
     concat_ws,
     countDistinct,
     current_timestamp,
+    expr,
     lit,
     month,
     round,
@@ -148,6 +148,7 @@ def clean_and_enrich_silver(
     run_id: str | None = None,
     batch_id: str | None = None,
     allow_line_id_fallback: bool = True,
+    record_quality_metrics: bool = True,
 ) -> Any:
     """Làm sạch, ép kiểu và tính toán các chỉ số bổ sung cho tầng Silver.
 
@@ -158,6 +159,8 @@ def clean_and_enrich_silver(
         batch_id: Mã định danh batch nạp.
         allow_line_id_fallback: Chỉ bật cho historical bootstrap; incremental phải nhận
             Order_Line_ID thật từ upstream.
+        record_quality_metrics: Ghi metrics observability cho lần làm sạch này. Tắt khi
+            chỉ rebuild lịch sử customer nội bộ từ Bronze.
 
     Returns:
         Spark DataFrame sạch đã vượt qua Data Quality Gate.
@@ -343,11 +346,17 @@ def clean_and_enrich_silver(
         "Processing", "Shipped", "Delivered", "Returned", "Cancelled"
     )
     valid_timestamp = col("Source_Updated_At").isNotNull()
+    valid_event_time = ~(
+        col("Order_Date").isNotNull()
+        & col("Source_Updated_At").isNotNull()
+        & (col("Order_Date").cast("timestamp") > col("Source_Updated_At"))
+    )
     valid_upsert = (
         coalesce(null_cond & business_cond, lit(False))
         & valid_operation
         & valid_status
         & valid_timestamp
+        & valid_event_time
     )
     if "Product_ID" in typed_df.columns:
         valid_upsert = valid_upsert & col("Product_ID").isNotNull()
@@ -377,52 +386,50 @@ def clean_and_enrich_silver(
             & col("Source_Updated_At").isNotNull()
             & (col("Order_Date").cast("timestamp") > col("Source_Updated_At"))
         )
-        all_reasons_arr = array_remove(
-            array(
-                when(~coalesce(null_cond, lit(False)), lit("MISSING_REQUIRED_FIELDS")),
-                when(~order_id_present, lit("MISSING_ORDER_ID")),
-                when(is_upsert & col("Customer_ID").isNull(), lit("MISSING_CUSTOMER_ID")),
-                when(is_upsert & col("Order_Status").isNull(), lit("MISSING_ORDER_STATUS")),
-                when(~line_id_present, lit("MISSING_LINE_ID"))
-                if not allow_line_id_fallback
-                else lit(None),
-                when(is_upsert & col("Product_ID").isNull(), lit("MISSING_PRODUCT_ID"))
-                if "Product_ID" in typed_df.columns
-                else lit(None),
-                when(
-                    is_upsert & (col("Quantity").isNull() | (col("Quantity") <= 0)),
-                    lit("INVALID_QUANTITY"),
-                ),
-                when(
-                    is_upsert & (col("Unit_Price").isNull() | (col("Unit_Price") < 0)),
-                    lit("INVALID_UNIT_PRICE"),
-                ),
-                when(
-                    is_upsert & (col("Discount").isNull() | ~col("Discount").between(0, 1)),
-                    lit("INVALID_DISCOUNT"),
-                ),
-                when(
-                    is_upsert & col("Shipping_Days").isNotNull() & (col("Shipping_Days") < 0),
-                    lit("INVALID_SHIPPING_DAYS"),
-                ),
-                when(
-                    col("Operation").isNull() | ~col("Operation").isin("UPSERT", "DELETE"),
-                    lit("INVALID_OPERATION"),
-                ),
-                when(is_upsert & ~valid_status, lit("INVALID_ORDER_STATUS")),
-                when(col("Source_Updated_At").isNull(), lit("INVALID_UPDATED_AT")),
-                when(event_time_order_invalid, lit("INVALID_EVENT_TIME")),
-                when(
-                    is_upsert & (col("Cost").isNull() | (col("Cost") < 0)),
-                    lit("INVALID_COST"),
-                ),
-                when(col("_sequence_conflict"), lit("SEQUENCE_CONFLICT")),
+        all_reasons_arr = array(
+            when(~coalesce(null_cond, lit(False)), lit("MISSING_REQUIRED_FIELDS")),
+            when(~order_id_present, lit("MISSING_ORDER_ID")),
+            when(is_upsert & col("Customer_ID").isNull(), lit("MISSING_CUSTOMER_ID")),
+            when(is_upsert & col("Order_Status").isNull(), lit("MISSING_ORDER_STATUS")),
+            when(~line_id_present, lit("MISSING_LINE_ID"))
+            if not allow_line_id_fallback
+            else lit(None),
+            when(is_upsert & col("Product_ID").isNull(), lit("MISSING_PRODUCT_ID"))
+            if "Product_ID" in typed_df.columns
+            else lit(None),
+            when(
+                is_upsert & (col("Quantity").isNull() | (col("Quantity") <= 0)),
+                lit("INVALID_QUANTITY"),
             ),
-            None,
+            when(
+                is_upsert & (col("Unit_Price").isNull() | (col("Unit_Price") < 0)),
+                lit("INVALID_UNIT_PRICE"),
+            ),
+            when(
+                is_upsert & (col("Discount").isNull() | ~col("Discount").between(0, 1)),
+                lit("INVALID_DISCOUNT"),
+            ),
+            when(
+                is_upsert & col("Shipping_Days").isNotNull() & (col("Shipping_Days") < 0),
+                lit("INVALID_SHIPPING_DAYS"),
+            ),
+            when(
+                col("Operation").isNull() | ~col("Operation").isin("UPSERT", "DELETE"),
+                lit("INVALID_OPERATION"),
+            ),
+            when(is_upsert & ~valid_status, lit("INVALID_ORDER_STATUS")),
+            when(col("Source_Updated_At").isNull(), lit("INVALID_UPDATED_AT")),
+            when(event_time_order_invalid, lit("INVALID_EVENT_TIME")),
+            when(
+                is_upsert & (col("Cost").isNull() | (col("Cost") < 0)),
+                lit("INVALID_COST"),
+            ),
+            when(col("_sequence_conflict"), lit("SEQUENCE_CONFLICT")),
         )
 
         rejected_df = (
-            rejected_df.withColumn("error_codes", all_reasons_arr)
+            rejected_df.withColumn("_error_codes_raw", all_reasons_arr)
+            .withColumn("error_codes", expr("filter(_error_codes_raw, x -> x is not null)"))
             .withColumn("rejection_reasons", col("error_codes"))
             .withColumn(
                 "rejection_reason",
@@ -430,6 +437,7 @@ def clean_and_enrich_silver(
                     lit("DATA_CONTRACT_VIOLATION")
                 ),
             )
+            .drop("_error_codes_raw")
             .withColumn("rejected_at", current_timestamp())
         )
 
@@ -526,15 +534,16 @@ def clean_and_enrich_silver(
     )
 
     # Ghi nhận chỉ số Data Quality Metrics
-    record_pipeline_quality(
-        clean_df.sparkSession,
-        raw_count=raw_count,
-        clean_count=clean_count,
-        rejected_count=rejected_count,
-        duplicate_count=duplicate_count,
-        run_id=run_id,
-        batch_id=batch_id,
-    )
+    if record_quality_metrics:
+        record_pipeline_quality(
+            clean_df.sparkSession,
+            raw_count=raw_count,
+            clean_count=clean_count,
+            rejected_count=rejected_count,
+            duplicate_count=duplicate_count,
+            run_id=run_id,
+            batch_id=batch_id,
+        )
 
     LOGGER.info("Hoàn tất xử lý Silver Layer với %d dòng bản ghi sạch.", clean_count)
     return clean_df
@@ -553,6 +562,24 @@ def _latest_event(df: Any, keys: list[str]) -> Any:
         .filter(col("_latest_row") == 1)
         .drop("_latest_row")
     )
+
+
+def build_silver_current_events(events_df: Any) -> Any:
+    """Lấy snapshot line hiện hành từ event history cho Gold và reconciliation.
+
+    Bronze giữ mọi version để audit; bảng Silver backing có thể chứa event đã
+    được MERGE. Hàm này vẫn bảo vệ Gold bằng cách chọn một event thắng cho mỗi
+    order line và loại soft-delete trước khi dựng dimensions, facts hoặc marts.
+    """
+    if "Order_Line_ID" not in events_df.columns:
+        if "Is_Deleted" not in events_df.columns:
+            return events_df
+        return events_df.filter(~coalesce(col("Is_Deleted"), lit(False)))
+
+    latest = _latest_event(events_df, ["Order_ID", "Order_Line_ID"])
+    if "Is_Deleted" not in latest.columns:
+        return latest
+    return latest.filter(~coalesce(col("Is_Deleted"), lit(False)))
 
 
 def build_silver_order_lines_current(events_df: Any) -> Any:

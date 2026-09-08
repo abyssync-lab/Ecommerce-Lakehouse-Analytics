@@ -6,7 +6,11 @@ Pipeline đảm bảo idempotency, event ordering, quarantine, reconciliation v�
 [![Python Version](https://img.shields.io/badge/Python-3.10%2B-blue.svg)](https://www.python.org/)
 [![PySpark](https://img.shields.io/badge/PySpark-3.5-orange.svg)](https://spark.apache.org/)
 [![Delta Lake](https://img.shields.io/badge/Delta%20Lake-3.x-00ADD8.svg)](https://delta.io/)
-[![Quality](https://img.shields.io/badge/quality-Ruff%20%2B%20Pytest-4c1.svg)](https://docs.pytest.org/)
+[![Pandas](https://img.shields.io/badge/Pandas-2.x-150458.svg)](https://pandas.pydata.org/)
+[![PyYAML](https://img.shields.io/badge/PyYAML-6.x-cc0000.svg)](https://pyyaml.org/)
+[![Ruff](https://img.shields.io/badge/lint-Ruff-261230.svg)](https://docs.astral.sh/ruff/)
+[![Pytest](https://img.shields.io/badge/test-Pytest-0A9EDC.svg)](https://docs.pytest.org/)
+[![CI](https://github.com/haminhthong/Ecommerce-Lakehouse-Analytics/actions/workflows/quality.yml/badge.svg)](https://github.com/haminhthong/Ecommerce-Lakehouse-Analytics/actions/workflows/quality.yml)
 
 ## Project Snapshot
 
@@ -57,6 +61,7 @@ flowchart TD
     SILVER["SILVER<br/>Current order + order-line state"]
     GOLD["GOLD STAGING<br/>Dimensions + facts + marts"]
     RECON["RECONCILIATION<br/>PASS / FAIL"]
+    POINTER["ctl_publications.current_run_id<br/>Publication pointer"]
     CERTIFIED["CERTIFIED GOLD<br/>Stable serving views"]
     PBI["POWER BI"]
 
@@ -67,9 +72,9 @@ flowchart TD
     QUALITY --> SILVER
     SILVER --> GOLD
     GOLD --> RECON
-    RECON -->|PASS| CERTIFIED
-    RECON -->|FAIL| CONTROL
-    CONTROL --> CERTIFIED
+    RECON -->|PASS| POINTER
+    RECON -->|FAIL - giữ run trước| POINTER
+    POINTER --> CERTIFIED
     CERTIFIED --> PBI
 ~~~
 
@@ -93,7 +98,7 @@ README giữ logic cần hiểu khi review; implementation detail được tách
 
 ### Bronze
 
-bronze.ecommerce_raw_delta có grain một change event cho một order line. Giá trị
+`bronze.ecommerce_raw` có grain một change event cho một order line. Giá trị
 nguồn được giữ nguyên dạng raw; metadata gồm run, batch, source hash, row number,
 record hash, contract version và pipeline version.
 
@@ -101,7 +106,7 @@ record hash, contract version và pipeline version.
 
 | Bảng | Grain | Vai trò |
 |---|---|---|
-| silver.ecommerce_clean_delta | Một event hợp lệ | Event history đã chuẩn hóa để audit và incremental merge |
+| silver.ecommerce_clean | Một current event cho mỗi order line | Bảng Delta backing cho MERGE; không phải nguồn audit lịch sử |
 | silver.silver_orders_current_delta | Một Order_ID | Current order header |
 | silver.silver_order_lines_current_delta | Một (Order_ID, Order_Line_ID) | Current order line, có soft delete |
 | quarantine.rejected_rows | Một dòng bị loại | Dữ liệu lỗi và error_codes để điều tra |
@@ -138,6 +143,10 @@ Policy cho revenue, return, RFM và ABC được khai báo trong
 [contracts/business_metrics.yaml](contracts/business_metrics.yaml), không hard-code
 rải rác trong report.
 
+`build_all_marts` vẫn tồn tại như compatibility helper cho test và consumer cũ;
+publication production dùng `build_certified_marts` để bảo đảm sáu mart trên cùng
+policy và cùng `Publication_Run_ID`.
+
 ## Data Quality Results
 
 Các invariant dưới đây là tiêu chí publish. Test tương ứng nằm trong tests/ và
@@ -161,17 +170,20 @@ vượt ngưỡng sẽ làm batch thất bại trước publication.
 
 Delta Lake atomic theo từng table, không atomic cho toàn bộ Gold schema. Pipeline:
 
-1. Ghi dimensions, facts và marts vào gold/_runs/<run_id>.
-2. Sau reconciliation, ghi dữ liệu vào serving và đổi pointer trong
-   ctl_publications_delta.
+1. Ghi dimensions, facts và marts vào `gold/_runs/<run_id>`.
+2. Chạy reconciliation trên toàn bộ snapshot staging.
+3. Chỉ khi PASS mới cập nhật `ctl_publications.current_run_id`.
+4. Stable views ở serving đọc theo pointer; không copy một phần Gold mới vào
+   serving trước khi kiểm tra hoàn tất.
 
 Các view trong database serving chỉ trả row có Publication_Run_ID bằng
 current_run_id. Nếu run mới lỗi, run cũ vẫn là bản Power BI nhìn thấy.
 
-Report artifact hiện có tại [BI_BIG .pbix](<BI_BIG .pbix>). Code sinh báo cáo mặc
-định đọc serving.gold_sales_enriched từ publication hiện hành. Tùy chọn --source csv
-chỉ dành cho validation độc lập, không phải nguồn dashboard certified. Repo hiện
-chưa có screenshot dashboard được commit nên không nhúng ảnh giả.
+Report artifact hiện có tại [GlobalCart_Analytics.pbix](<powerbi/GlobalCart_Analytics.pbix>). Code sinh báo cáo mặc
+định đọc `serving.gold_sales_enriched` và `serving.fact_order_fulfillment` từ
+publication hiện hành. Tùy chọn `--source csv` chỉ dành cho validation độc lập,
+không phải nguồn dashboard certified. Repo hiện chưa có screenshot dashboard được
+commit nên không nhúng ảnh giả.
 
 ## Cấu trúc thư mục dự án (Project Structure)
 
@@ -195,9 +207,11 @@ Ecommerce-Lakehouse-Analytics/
 ├── contracts/                     # data contract và business policy
 ├── Data/                          # seed và sample batches
 ├── docs/                          # thiết kế chi tiết theo từng concern
+├── scripts/                       # validate contract và benchmark
 ├── tests/                         # unit, integration và invariant tests
 ├── .github/workflows/quality.yml  # CI có Spark + Delta thật
-├── BI_BIG .pbix                   # Power BI artifact hiện có
+├── powerbi/                        # Power BI artifact và screenshot
+│   └── GlobalCart_Analytics.pbix
 ├── requirements.txt
 └── pyproject.toml
 ~~~
@@ -296,13 +310,15 @@ Các lệnh demo Delta hoặc connector legacy không thuộc data path chính c
 
 ~~~powershell
 python -m ruff check SourceCode tests scripts
+python scripts/validate_contracts.py
 python -m compileall -q SourceCode
 python -m pytest -q
 ~~~
 
-CI trong .github/workflows/quality.yml cài Java 17, PySpark và Delta Lake, sau đó
-chạy Ruff, toàn bộ test, validate contract, bootstrap certified Gold và report
-validation. Integration test không được skip khi thiếu PySpark trong CI.
+CI trong .github/workflows/quality.yml cài Java 17, PySpark, Delta Lake và Ruff,
+sau đó chạy lint, format check, parse contract, toàn bộ test, validate input,
+bootstrap certified Gold và report validation. Integration test không được skip khi
+thiếu PySpark trong CI.
 
 ## Tài liệu thiết kế
 
@@ -341,8 +357,6 @@ Chỉ mở rộng sau khi các invariant của v1 ổn định:
 2. Thêm Airflow DAG mỏng chỉ gọi package entrypoint, không chứa business logic.
 3. Bổ sung monitoring/alerting dựa trên control plane.
 4. Khi có yêu cầu nghiệp vụ thật mới đánh giá thêm nguồn dữ liệu hoặc streaming.
-
-
 
 ## Thông điệp chính của dự án
 

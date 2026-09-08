@@ -619,7 +619,12 @@ def build_sales_enriched(fact_sales: Any, dimensions: dict[str, Any]) -> Any:
 
 
 def build_all_marts(clean_df: Any) -> dict[str, Any]:
-    """Tạo toàn bộ Gold Data Marts tổng hợp cho tầng Gold."""
+    """Tạo các mart tương thích cho test và consumer cũ.
+
+    Luồng production dùng ``build_certified_marts`` để tạo sáu mart có policy
+    nghiệp vụ và publication version rõ ràng. Hàm này vẫn được giữ để không
+    phá API cũ trong giai đoạn chuyển tiếp.
+    """
     LOGGER.info("Bắt đầu xây dựng Gold Data Marts...")
 
     clean_df = _ensure_certified_measures(clean_df)

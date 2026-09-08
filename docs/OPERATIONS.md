@@ -131,12 +131,13 @@ Alert khi:
 Workflow .github/workflows/quality.yml phải:
 
 1. cài Python và Java 17;
-2. cài requirements và Ruff;
-3. chạy Ruff;
-4. chạy unit và Spark integration tests;
-5. validate input contract;
-6. bootstrap certified Gold;
-7. build report từ published Gold.
+2. cài requirements và Ruff phiên bản đã pin;
+3. chạy Ruff lint và format check cho pipeline code được duy trì;
+4. parse toàn bộ YAML contract;
+5. chạy unit và Spark integration tests;
+6. validate input contract;
+7. bootstrap certified Gold;
+8. build report từ published Gold.
 
 Không dùng pytest.skip để che việc thiếu PySpark/Delta trong integration job.
 

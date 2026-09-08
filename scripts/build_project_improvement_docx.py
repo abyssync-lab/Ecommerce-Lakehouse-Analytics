@@ -651,7 +651,7 @@ def build_document():
         "[ ] Xác minh số dòng Bronze/Silver/Fact và tất cả foreign keys.",
         "[ ] Xác minh MongoDB collection count và index.",
         "[ ] Mở Power BI qua Thrift, refresh thành công.",
-        "[ ] Đổi tên PBIX cuối thành GlobalCart_Intelligence_Dashboard.pbix.",
+        "[x] Đặt PBIX tại powerbi/GlobalCart_Analytics.pbix.",
         "[ ] Thêm 2–3 ảnh dashboard vào docs/images và README.",
         "[ ] Đổi tên repository thành globalcart-intelligence.",
         "[ ] Kiểm tra repository không chứa secret, cache hoặc runtime database.",

@@ -11,6 +11,7 @@ sys.path.insert(0, str(SOURCE_DIR))
 
 # Ép Spark chạy loopback trong CI để driver không cố bind vào hostname không phân giải được.
 os.environ.setdefault("SPARK_LOCAL_IP", "127.0.0.1")
+os.environ.setdefault("SPARK_LOCAL_HOSTNAME", "localhost")
 os.environ.setdefault("HADOOP_USER_NAME", "hadoop")
 
 
@@ -25,6 +26,7 @@ def spark_session():
         .appName("GlobalCartTestSuite")
         .config("spark.driver.host", "127.0.0.1")
         .config("spark.driver.bindAddress", "127.0.0.1")
+        .config("spark.driver.port", "0")
         .config("spark.sql.extensions", "io.delta.sql.DeltaSparkSessionExtension")
         .config("spark.sql.catalog.spark_catalog", "org.apache.spark.sql.delta.catalog.DeltaCatalog")
         .config("spark.sql.shuffle.partitions", "2")

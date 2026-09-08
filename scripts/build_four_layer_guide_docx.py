@@ -309,7 +309,7 @@ def portfolio_layer(document):
         [4300, 5060],
     )
     document.add_heading("5.2 Demo cần có", level=2)
-    add_bullet(document, "Chỉ giữ GlobalCart_Intelligence_Dashboard.pbix.")
+    add_bullet(document, "Chỉ giữ powerbi/GlobalCart_Analytics.pbix.")
     add_bullet(document, "Thêm ảnh Executive Overview, RFM, ABC và Fulfillment/Returns.")
     add_bullet(document, "Nêu ba insight, một khuyến nghị và một limitation.")
     add_bullet(document, "Có log hoặc video chứng minh refresh từ Gold thành công.")

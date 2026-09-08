@@ -2,6 +2,9 @@
 
 Gold được xây dựng theo run-scoped snapshot. Mỗi run tạo dimensions, facts và
 marts riêng trong gold staging; chỉ snapshot đã reconcile mới được phục vụ BI.
+Facts và Type 1 dimensions chỉ đọc current event snapshot của Silver. SCD2
+customer đọc lại Bronze history qua cùng quality rules để giữ late-arriving events;
+Bronze vẫn là nguồn audit, không được dùng trực tiếp làm nguồn số liệu Gold.
 
 ## Dimensions
 

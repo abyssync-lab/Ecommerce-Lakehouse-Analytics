@@ -88,7 +88,14 @@ def run_reconciliation() -> int:
     temp_dir = PROJECT_ROOT / "scratch" / "pytest_temp"
     temp_dir.mkdir(parents=True, exist_ok=True)
     return subprocess.run(
-        [sys.executable, "-m", "pytest", "tests/test_reconciliation.py", "-v", f"--basetemp={temp_dir}"],
+        [
+            sys.executable,
+            "-m",
+            "pytest",
+            "tests/test_reconciliation.py",
+            "-v",
+            f"--basetemp={temp_dir}",
+        ],
         cwd=PROJECT_ROOT,
         check=False,
     ).returncode
@@ -119,7 +126,9 @@ def build_parser() -> argparse.ArgumentParser:
     reconcile_parser = commands.add_parser(
         "reconcile", help="⚖️ Chạy kiểm toán đối soát bất biến doanh thu, grain và SCD2"
     )
-    reconcile_parser.add_argument("--run-id", type=str, default=None, help="Mã nhận diện phiên kiểm toán")
+    reconcile_parser.add_argument(
+        "--run-id", type=str, default=None, help="Mã nhận diện phiên kiểm toán"
+    )
 
     pipeline_parser = commands.add_parser(
         "pipeline", help="⚙️ Chạy Pipeline PySpark Medallion Lakehouse (Bootstrap / Incremental)"
@@ -174,7 +183,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
 
     commands.add_parser(
-        "delta-demo", help="🧪 Khởi chạy các kịch bản thử nghiệm Delta Lake (Time Travel, Schema Enforcement cô lập)"
+        "delta-demo",
+        help="🧪 Khởi chạy các kịch bản thử nghiệm Delta Lake (Time Travel, Schema Enforcement cô lập)",
     )
     commands.add_parser(
         "benchmark", help="📈 Khởi chạy Synthetic Scalability Benchmark (10K, 100K, 1M rows)"
@@ -216,7 +226,9 @@ def main(arguments: list[str] | None = None) -> int:
     if args.command == "benchmark":
         LOGGER.info("Khởi chạy Synthetic Scalability Benchmark...")
         benchmark_script = PROJECT_ROOT / "scripts" / "benchmark_scalability.py"
-        return subprocess.run([sys.executable, str(benchmark_script)], cwd=PROJECT_ROOT, check=False).returncode
+        return subprocess.run(
+            [sys.executable, str(benchmark_script)], cwd=PROJECT_ROOT, check=False
+        ).returncode
 
     if args.command == "delta-demo":
         LOGGER.info("Khởi chạy kịch bản thử nghiệm Delta Lake...")
@@ -232,7 +244,10 @@ def main(arguments: list[str] | None = None) -> int:
     if args.command == "pipeline":
         env_vars = {}
         script_args = []
-        is_incremental = getattr(args, "incremental", False) or getattr(args, "mode", "bootstrap") == "incremental"
+        is_incremental = (
+            getattr(args, "incremental", False)
+            or getattr(args, "mode", "bootstrap") == "incremental"
+        )
 
         if getattr(args, "local", False):
             env_vars["ECOMMERCE_USE_LOCAL_STORAGE"] = "true"
