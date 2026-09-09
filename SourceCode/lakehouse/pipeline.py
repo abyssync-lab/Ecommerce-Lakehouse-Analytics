@@ -160,6 +160,11 @@ def create_spark_session() -> SparkSession:
             "org.apache.spark.sql.delta.catalog.DeltaCatalog",
         )
     )
+    # Entrypoint được gọi trực tiếp bằng `python`, vì vậy local/CI cần master
+    # mặc định thay vì phụ thuộc vào spark-submit đã cấu hình sẵn.
+    master_url = os.getenv("SPARK_MASTER") or ("local[2]" if SETTINGS.use_local_storage else None)
+    if master_url:
+        builder = builder.master(master_url)
 
     if driver_host:
         builder = builder.config("spark.driver.host", driver_host)

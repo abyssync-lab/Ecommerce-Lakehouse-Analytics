@@ -1,6 +1,6 @@
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "-q --basetemp=./scratch/pytest_temp"
+addopts = "-q -p no:cacheprovider"
 
 [tool.ruff]
 target-version = "py310"

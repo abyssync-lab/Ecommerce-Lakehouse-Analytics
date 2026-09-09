@@ -138,7 +138,12 @@ def validate_silver_data(
         reject_rate,
     )
 
-    if clean_count == 0 or failed:
+    # Một batch chỉ có dòng lỗi vẫn phải trả về DataFrame rỗng để caller kiểm tra
+    # quarantine và reject-rate. Chính pipeline mới quyết định FAILED khi vượt ngưỡng.
+    no_accepted_rows_without_reason = (
+        clean_count == 0 and raw_count > 0 and rejected_count == 0 and duplicate_count == 0
+    )
+    if failed or no_accepted_rows_without_reason:
         raise ValueError("Tầng Silver không đạt chất lượng Data Contract: " + "; ".join(failed))
 
 

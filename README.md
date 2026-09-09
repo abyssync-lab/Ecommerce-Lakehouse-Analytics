@@ -5,7 +5,7 @@ Pipeline đảm bảo idempotency, event ordering, quarantine, reconciliation v�
 
 [![Python Version](https://img.shields.io/badge/Python-3.10%2B-blue.svg)](https://www.python.org/)
 [![PySpark](https://img.shields.io/badge/PySpark-3.5-orange.svg)](https://spark.apache.org/)
-[![Delta Lake](https://img.shields.io/badge/Delta%20Lake-3.x-00ADD8.svg)](https://delta.io/)
+[![Delta Lake](https://img.shields.io/badge/Delta%20Lake-3.2--3.3-00ADD8.svg)](https://delta.io/)
 [![Pandas](https://img.shields.io/badge/Pandas-2.x-150458.svg)](https://pandas.pydata.org/)
 [![PyYAML](https://img.shields.io/badge/PyYAML-6.x-cc0000.svg)](https://pyyaml.org/)
 [![Ruff](https://img.shields.io/badge/lint-Ruff-261230.svg)](https://docs.astral.sh/ruff/)
@@ -166,6 +166,29 @@ Các invariant dưới đây là tiêu chí publish. Test tương ứng nằm tr
 Ngưỡng reject mặc định là 5%. Có thể cấu hình bằng ECOMMERCE_MAX_REJECT_RATE;
 vượt ngưỡng sẽ làm batch thất bại trước publication.
 
+## CI/CD và cách phát hành dữ liệu
+
+CI là GitHub Actions trong
+[.github/workflows/quality.yml](.github/workflows/quality.yml), gồm hai job nối tiếp.
+`fast-checks` chạy Ruff, format check và parse contract. `spark-integration` cài Java
+17, PySpark 3.5.x và Delta Lake 3.2–3.3, rồi chạy toàn bộ unit/integration/e2e tests,
+kiểm tra input, bootstrap Gold và dựng report từ publication. Integration test không
+được skip khi thiếu Spark; thiếu dependency phải làm job đỏ.
+
+CD của v1 là certified data publication, không phải deploy ứng dụng riêng. Mỗi
+pipeline run ghi Gold vào `gold/_runs/<run_id>`, reconciliation kiểm tra snapshot,
+rồi mới cập nhật `ctl_publications.current_run_id`. Vì vậy đây là chuỗi phát hành:
+
+~~~text
+code change -> CI xanh -> pipeline run -> Gold staging -> reconciliation PASS
+            -> publication pointer -> serving views -> Power BI
+~~~
+
+Nếu reconciliation hoặc bước ghi Gold thất bại, run được đánh dấu `FAILED` và
+publication pointer vẫn trỏ tới run tốt trước đó. CLI là entrypoint chuẩn dùng cho
+local, test và CI; Airflow chỉ được thêm sau khi entrypoint này ổn định và DAG sẽ
+chỉ gọi job, không chứa business logic.
+
 ## Certified publication cho Power BI
 
 Delta Lake atomic theo từng table, không atomic cho toàn bộ Gold schema. Pipeline:
@@ -225,7 +248,7 @@ Yêu cầu:
 
 - Python 3.10 trở lên
 - Java 17 cho Spark local
-- PySpark 3.5.x và Delta Lake 3.x
+- PySpark 3.5.x và Delta Lake 3.2–3.3
 
 ~~~powershell
 python -m venv .venv
