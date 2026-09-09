@@ -15,7 +15,6 @@ from pyspark.sql.functions import (
     expr,
     lit,
     month,
-    round,
     row_number,
     sha2,
     size,
@@ -26,6 +25,7 @@ from pyspark.sql.functions import (
     when,
     year,
 )
+from pyspark.sql.functions import round as spark_round
 from pyspark.sql.window import Window
 
 from .contracts.loader import get_spark_silver_rules, load_contract
@@ -468,11 +468,11 @@ def clean_and_enrich_silver(
     clean_df = (
         clean_df.withColumnRenamed("Revenue", "Source_Revenue")
         .withColumnRenamed("Profit", "Source_Profit")
-        .withColumn("Gross_Amount", round(col("Quantity") * col("Unit_Price"), 2))
-        .withColumn("Discount_Amount", round(col("Gross_Amount") * col("Discount"), 2))
-        .withColumn("Net_Line_Amount", round(col("Gross_Amount") - col("Discount_Amount"), 2))
-        .withColumn("Cost_Amount", round(col("Quantity") * col("Cost"), 2))
-        .withColumn("Gross_Profit", round(col("Net_Line_Amount") - col("Cost_Amount"), 2))
+        .withColumn("Gross_Amount", spark_round(col("Quantity") * col("Unit_Price"), 2))
+        .withColumn("Discount_Amount", spark_round(col("Gross_Amount") * col("Discount"), 2))
+        .withColumn("Net_Line_Amount", spark_round(col("Gross_Amount") - col("Discount_Amount"), 2))
+        .withColumn("Cost_Amount", spark_round(col("Quantity") * col("Cost"), 2))
+        .withColumn("Gross_Profit", spark_round(col("Net_Line_Amount") - col("Cost_Amount"), 2))
     )
     clean_df = clean_df.withColumn(
         "Is_Deleted", when(col("Operation") == "DELETE", lit(True)).otherwise(lit(False))
