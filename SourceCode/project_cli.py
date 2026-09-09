@@ -72,11 +72,8 @@ def run_quality_checks() -> int:
         return report_code
 
     LOGGER.info("Khởi chạy bộ kiểm thử tự động Pytest...")
-    temp_dir = PROJECT_ROOT / "scratch" / "pytest_temp"
-    temp_dir.mkdir(parents=True, exist_ok=True)
-
     return subprocess.run(
-        [sys.executable, "-m", "pytest", "-v", f"--basetemp={temp_dir}"],
+        [sys.executable, "-m", "pytest", "-v"],
         cwd=PROJECT_ROOT,
         check=False,
     ).returncode
@@ -85,17 +82,8 @@ def run_quality_checks() -> int:
 def run_reconciliation() -> int:
     """Khởi chạy bộ kiểm toán đối soát bất biến doanh thu, số dòng và SCD2."""
     LOGGER.info("Khởi chạy kiểm toán Data Reconciliation Gate...")
-    temp_dir = PROJECT_ROOT / "scratch" / "pytest_temp"
-    temp_dir.mkdir(parents=True, exist_ok=True)
     return subprocess.run(
-        [
-            sys.executable,
-            "-m",
-            "pytest",
-            "tests/test_reconciliation.py",
-            "-v",
-            f"--basetemp={temp_dir}",
-        ],
+        [sys.executable, "-m", "pytest", "tests/test_reconciliation.py", "-v"],
         cwd=PROJECT_ROOT,
         check=False,
     ).returncode

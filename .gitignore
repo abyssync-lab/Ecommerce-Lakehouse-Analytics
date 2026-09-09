@@ -2,7 +2,8 @@ __pycache__/
 *.py[cod]
 .pytest_cache/
 .ruff_cache/
-scratch/pytest_temp/
+Output/
+docs/BUSINESS_INSIGHTS.md
 .venv/
 .env
 .idea/
@@ -10,5 +11,3 @@ SourceCode/metastore_db/
 SourceCode/spark-warehouse/
 SourceCode/derby.log
 *.log
-Output/*.csv
-!Output/.gitkeep
