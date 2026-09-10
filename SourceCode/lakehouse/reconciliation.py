@@ -85,16 +85,47 @@ def reconcile_row_conservation(
 
 
 def reconcile_fact_grain_uniqueness(fact_sales: Any) -> dict[str, Any]:
-    """Kiểm tra tính duy nhất của Grain trong FactSales (Mỗi SalesKey đại diện đúng 1 line item)."""
+    """Kiểm tra cả surrogate key và business grain của fact line."""
     total_rows = fact_sales.count()
-    distinct_keys = fact_sales.select(countDistinct("SalesKey")).collect()[0][0]
-    passed = total_rows == distinct_keys
+    distinct_keys = fact_sales.select(countDistinct("SalesKey")).first()[0]
+    grain_columns = ["Order_ID", "Order_Line_ID"]
+    if not set(grain_columns).issubset(fact_sales.columns):
+        grain_columns = ["Order_ID", "Product_ID"]
+    distinct_business_keys = fact_sales.select(*grain_columns).distinct().count()
+    duplicate_business_rows = total_rows - distinct_business_keys
+    passed = total_rows == distinct_keys and duplicate_business_rows == 0
 
     return {
         "check": "fact_grain_uniqueness",
         "passed": passed,
         "total_fact_rows": total_rows,
         "distinct_sales_keys": distinct_keys,
+        "grain_columns": grain_columns,
+        "distinct_business_keys": distinct_business_keys,
+        "duplicate_business_rows": duplicate_business_rows,
+    }
+
+
+def assert_unique_grain(dataframe: Any, columns: list[str]) -> None:
+    """Ném AssertionError khi DataFrame không duy nhất theo grain được chỉ định."""
+    total_rows = dataframe.count()
+    distinct_rows = dataframe.select(*columns).distinct().count()
+    if total_rows != distinct_rows:
+        raise AssertionError(
+            f"Grain không duy nhất theo {columns}: tổng={total_rows}, khác biệt={distinct_rows}"
+        )
+
+
+def reconcile_order_fact_grain(fact_order_fulfillment: Any) -> dict[str, Any]:
+    """Kiểm tra fact_order_fulfillment chỉ có một dòng cho mỗi Order_ID."""
+    total_rows = fact_order_fulfillment.count()
+    distinct_orders = fact_order_fulfillment.select("Order_ID").distinct().count()
+    passed = total_rows == distinct_orders
+    return {
+        "check": "order_fact_grain",
+        "passed": passed,
+        "total_order_fact_rows": total_rows,
+        "distinct_order_ids": distinct_orders,
     }
 
 
@@ -264,20 +295,15 @@ def run_full_reconciliation(
     silver_grain_check = reconcile_current_state_grain(
         silver_orders_current, silver_order_lines_current
     )
-    order_fact_check = {
-        "check": "order_fact_grain",
-        "passed": True,
-        "note": "Không truyền fact_order_fulfillment; bỏ qua ở API tương thích.",
-    }
-    if fact_order_fulfillment is not None:
-        total_orders = fact_order_fulfillment.count()
-        distinct_orders = fact_order_fulfillment.select("OrderKey").distinct().count()
-        order_fact_check = {
+    order_fact_check = (
+        reconcile_order_fact_grain(fact_order_fulfillment)
+        if fact_order_fulfillment is not None
+        else {
             "check": "order_fact_grain",
-            "passed": total_orders == distinct_orders,
-            "total_order_fact_rows": total_orders,
-            "distinct_order_keys": distinct_orders,
+            "passed": True,
+            "note": "Không truyền fact_order_fulfillment; bỏ qua ở API tương thích.",
         }
+    )
 
     all_passed = all(
         [

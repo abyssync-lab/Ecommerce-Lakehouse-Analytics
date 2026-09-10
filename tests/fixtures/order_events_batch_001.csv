@@ -1,0 +1,4 @@
+Order_ID,Order_Line_ID,Product_ID,Product_Name,Category,Sub_Category,Source_Updated_At,Operation,Order_Date,Customer_ID,Customer_Gender,Customer_Segment,Quantity,Unit_Price,Discount,Cost,Order_Status,Payment_Method,Shipping_Method,Shipping_Cost,Shipping_Days,Region,Country
+A001,L1,P001,Laptop,Electronics,Computer,2026-08-01 10:00:00,UPSERT,2026-08-01,C001,Female,Consumer,1,100.00,0.00,60.00,Delivered,Card,Standard,20.00,2,Asia,Vietnam
+A001,L2,P002,Mouse,Electronics,Accessory,2026-08-01 10:00:00,UPSERT,2026-08-01,C001,Female,Consumer,1,50.00,0.00,30.00,Delivered,Card,Standard,20.00,2,Asia,Vietnam
+B001,L1,P003,Keyboard,Electronics,Accessory,2026-08-01 10:00:00,UPSERT,2026-08-01,C002,Male,Consumer,1,80.00,0.00,40.00,Processing,Card,Express,15.00,3,Asia,Vietnam

@@ -7,7 +7,7 @@ Mỗi ``run_id`` chỉ có một dòng và mọi chuyển trạng thái đều c
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 from config import SETTINGS
@@ -101,7 +101,7 @@ class BatchRegistry:
 
     @staticmethod
     def _now() -> datetime:
-        return datetime.now(timezone.utc).replace(tzinfo=None)
+        return datetime.now(UTC).replace(tzinfo=None)
 
     def _empty_payload(self) -> dict[str, Any]:
         """Tạo payload đầy đủ schema để insert không làm drift schema."""

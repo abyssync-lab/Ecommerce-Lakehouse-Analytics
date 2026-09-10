@@ -7,7 +7,7 @@ PySpark local + Delta Lake và không phụ thuộc dịch vụ bên ngoài.
 
 Yêu cầu:
 
-- Python 3.10+;
+- Python 3.11;
 - Java 17;
 - PySpark 3.5.x;
 - delta-spark 3.x;
@@ -17,7 +17,7 @@ Yêu cầu:
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
 python -m pip install --upgrade pip
-python -m pip install -r requirements.txt
+python -m pip install -e ".[dev]"
 ~~~
 
 Local storage mặc định:
@@ -46,7 +46,7 @@ python SourceCode/SparkEcommerceAnalysis.py --input Data/EcommerceSalesDataset.c
 ### Incremental
 
 ~~~powershell
-python SourceCode/SparkEcommerceAnalysis.py --incremental --input Data/sample_batches/batch_001.csv --batch-id batch_20260907_0200
+python SourceCode/SparkEcommerceAnalysis.py --incremental --input tests/fixtures/order_events_batch_001.csv --batch-id batch_20260907_0200
 ~~~
 
 ### Report
@@ -127,15 +127,16 @@ Alert khi:
 Workflow .github/workflows/quality.yml phải:
 
 1. cài Python và Java 17;
-2. cài requirements và Ruff phiên bản đã pin;
-3. chạy Ruff lint và format check cho pipeline code được duy trì;
+2. cài project và nhóm dev từ `pyproject.toml`;
+3. chạy Ruff lint và format check trên toàn bộ `SourceCode`, `tests` và `scripts`;
 4. parse toàn bộ YAML contract;
 5. chạy unit và Spark integration tests;
 6. validate input contract;
 7. bootstrap Gold;
 8. build report từ published Gold.
+9. chạy `scripts/run_demo_pipeline.py` với fixture incremental cô lập.
 
-Không dùng pytest.skip để che việc thiếu PySpark/Delta trong integration job.
+Không được bỏ qua integration test để che việc thiếu PySpark/Delta trong job.
 
 ## Reset demo
 

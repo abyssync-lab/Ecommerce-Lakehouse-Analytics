@@ -21,12 +21,21 @@ if str(SOURCE_DIR) not in sys.path:
 
 from lakehouse.contracts.loader import load_contract, load_contract_for_columns
 from lakehouse.dimensions import build_all_dimensions
-from lakehouse.ingestion import calculate_source_hash
-from lakehouse.marts import build_all_marts, build_fact_sales, build_sales_enriched
+from lakehouse.ingestion import calculate_source_hash, validate_raw_schema
+from lakehouse.marts import (
+    build_all_marts,
+    build_fact_order_fulfillment,
+    build_fact_sales,
+    build_sales_enriched,
+)
 from lakehouse.pipeline import PipelineRunResult
-from lakehouse.reconciliation import run_full_reconciliation
+from lakehouse.reconciliation import assert_unique_grain, run_full_reconciliation
 from lakehouse.registry import BatchConflictError, BatchRegistry
-from lakehouse.silver import clean_and_enrich_silver
+from lakehouse.silver import (
+    build_silver_order_lines_current,
+    build_silver_orders_current,
+    clean_and_enrich_silver,
+)
 from pyspark.sql.functions import col
 from pyspark.sql.functions import sum as spark_sum
 
@@ -54,6 +63,16 @@ def test_change_contract_v2_is_selected_for_incremental_event_shape():
     assert contract.sequence_column == "Source_Updated_At"
     assert contract.operation_column == "Operation"
     assert contract.order_line_key_cols == ["Order_ID", "Order_Line_ID"]
+
+
+def test_partial_incremental_shape_fails_before_bronze():
+    """File v2 thiếu một marker phải bị chặn ở file-level validation."""
+
+    class RawFrame:
+        columns = ["Order_ID", "Order_Line_ID", "Source_Updated_At"]
+
+    with pytest.raises(ValueError, match="FILE_SCHEMA_MISMATCH"):
+        validate_raw_schema(RawFrame())
 
 
 def test_order_line_key_is_stable_across_micro_batches(spark_session):
@@ -269,6 +288,14 @@ def test_reconciliation_fails_when_revenue_discrepant(spark_session):
     clean_df = clean_and_enrich_silver(df)
     dims = build_all_dimensions(spark_session, clean_df)
     fact = build_fact_sales(clean_df, dims)
+    order_fact = build_fact_order_fulfillment(
+        build_silver_orders_current(clean_df),
+        build_silver_order_lines_current(clean_df),
+        dims,
+    )
+
+    assert_unique_grain(fact, ["Order_ID", "Order_Line_ID"])
+    assert_unique_grain(order_fact, ["Order_ID"])
     marts = build_all_marts(clean_df)
 
     # Cố tình giả lập sai lệch doanh thu trong overview mart.

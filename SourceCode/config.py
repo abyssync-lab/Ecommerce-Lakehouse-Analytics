@@ -28,7 +28,9 @@ def detect_spark_home() -> Path:
 
         return Path(pyspark.__file__).resolve().parent
     except ImportError as error:
-        raise RuntimeError("Chưa cài PySpark; hãy chạy pip install -r requirements.txt") from error
+        raise RuntimeError(
+            'Chưa cài PySpark; hãy chạy python -m pip install -e ".[dev]"'
+        ) from error
 
 
 def auto_set_spark_home_env() -> str | None:

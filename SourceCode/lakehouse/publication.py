@@ -11,7 +11,7 @@ Delta chỉ atomic trong phạm vi từng table. Module này dùng hai lớp b�
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 from config import SETTINGS
@@ -54,7 +54,7 @@ def _upsert_publication_pointer(spark: Any, run_id: str) -> None:
         (
             PUBLICATION_NAME,
             run_id,
-            datetime.now(timezone.utc).replace(tzinfo=None),
+            datetime.now(UTC).replace(tzinfo=None),
             "PUBLISHED",
         )
     ]

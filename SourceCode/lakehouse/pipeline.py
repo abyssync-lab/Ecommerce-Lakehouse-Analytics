@@ -34,6 +34,7 @@ from .ingestion import (
     calculate_source_size,
     enrich_with_ingestion_metadata,
     ingest_to_bronze,
+    validate_raw_schema,
 )
 from .marts import (
     build_fact_order_fulfillment,
@@ -544,6 +545,9 @@ def run_incremental_pipeline(
                 "FILE_SCHEMA_MISMATCH: incremental batch thiếu cột contract v2: "
                 + ", ".join(sorted(missing_event_columns))
             )
+        # API incremental có thể nhận DataFrame trực tiếp thay vì đi qua CLI;
+        # vì vậy vẫn phải chạy đủ file-level validation trước khi ghi Bronze.
+        validate_raw_schema(new_batch_df)
 
         bronze_path = SETTINGS.get_storage_path(SETTINGS.bronze_delta)
         bronze_has_source = DeltaTable.isDeltaTable(spark, bronze_path) and (

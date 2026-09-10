@@ -1,10 +1,11 @@
-# Ecommerce Lakehouse Analytics — GlobalCart Order & Fulfillment Platform
+# E-commerce Lakehouse Analytics — Incremental Order & Fulfillment Pipeline
 
 End-to-end batch lakehouse xử lý incremental order events từ OMS bằng PySpark +
-Delta Lake. Pipeline đảm bảo idempotency, event ordering, quarantine,
-reconciliation và atomic snapshot publication trước khi dữ liệu được Power BI sử dụng.
+Delta Lake. Pipeline tập trung vào content-hash duplicate protection, event
+ordering, quarantine, reconciliation và quality-gated serving snapshot trước khi
+dữ liệu được Power BI sử dụng.
 
-[![Python](https://img.shields.io/badge/Python-3.10%2B-3776AB.svg)](https://www.python.org/)
+[![Python](https://img.shields.io/badge/Python-3.11%2B-3776AB.svg)](https://www.python.org/)
 [![Apache Spark](https://img.shields.io/badge/Apache%20Spark-3.5-E25A1C.svg)](https://spark.apache.org/)
 [![PySpark](https://img.shields.io/badge/PySpark-3.5-orange.svg)](https://spark.apache.org/docs/latest/api/python/)
 [![Delta Lake](https://img.shields.io/badge/Delta%20Lake-3.2--3.3-00ADD8.svg)](https://delta.io/)
@@ -63,10 +64,12 @@ flowchart TD
     end
 
     subgraph DATA["DATA PLANE"]
-        OMS["OMS CSV batch"] --> BRONZE["Bronze\nraw change events"]
-        BRONZE --> VALIDATE["Contract + row validation"]
-        VALIDATE -->|invalid| QUARANTINE["Quarantine\nerror_codes"]
-        VALIDATE -->|valid| SILVER["Silver\ncurrent order + line state"]
+        OMS["OMS CSV batch"] --> FILE_VALIDATE["File-level contract validation"]
+        FILE_VALIDATE -->|valid| BRONZE["Bronze\nraw change events"]
+        FILE_VALIDATE -->|invalid| FILE_FAIL["File rejected\nrun FAILED"]
+        BRONZE --> ROW_VALIDATE["Row quality validation"]
+        ROW_VALIDATE -->|invalid| QUARANTINE["Quarantine\nerror_codes"]
+        ROW_VALIDATE -->|valid| SILVER["Silver\ncurrent order + line state"]
         SILVER --> GOLD["Gold staging\nfacts + six marts"]
         GOLD --> RECON["Reconciliation"]
     end
@@ -106,6 +109,19 @@ flowchart TD
 8. Reconciliation kiểm tra accounting, grain, foreign key, SCD2 nếu bật và
    tổng tiền Silver–Fact–Mart. Chỉ sau `PASS`, `publish_gold_run()` đổi
    `current_run_id` cho view serving.
+
+### Ví dụ incremental nhỏ
+
+```text
+Batch 001: A001/L1 UPSERT quantity=1, A001/L2 UPSERT quantity=1
+Batch 002: A001/L1 UPSERT quantity=2, A001/L2 DELETE
+Silver:    chỉ còn A001/L1 quantity=2
+Serving:   fact_sales_line có đúng một line với Net_Line_Amount=200.00
+```
+
+Pipeline chọn event mới nhất theo business key và `Source_Updated_At` trước khi
+lọc DELETE. Vì vậy chuỗi UPSERT → UPSERT → DELETE không thể làm line cũ sống lại.
+Replay cùng bytes nhưng khác tên file vẫn bị `SKIPPED` nhờ SHA-256 content hash.
 
 ## Quy tắc event quan trọng
 
@@ -186,6 +202,16 @@ Không có reject-rate 5% hard-code trong core pipeline. File sai schema hoặc
 không đọc được sẽ fail ở file-level; row sai được quarantine và vẫn được thống
 kê rõ trong run metadata.
 
+### Các quyết định kỹ thuật cần giữ nguyên
+
+- Hash idempotency lấy từ bytes file; `batch_id` và filename không phải identity.
+- Fact line có grain `(Order_ID, Order_Line_ID)`; fact order có grain `Order_ID`.
+- `Shipping_Cost` chỉ nằm ở order fact, không cộng lặp theo số line.
+- Gold facts và marts lấy từ Silver current state; SCD2 chỉ đọc Bronze history để
+  khôi phục lịch sử thuộc tính customer khi cần.
+- Reconciliation chạy trước publication pointer; run lỗi không thay đổi snapshot
+  mà Power BI đang sử dụng.
+
 ## Cấu trúc thư mục dự án (Project Structure)
 
 ```text
@@ -211,22 +237,22 @@ Ecommerce-Lakehouse-Analytics/
 ├── Data/                    # seed và dữ liệu đầu vào local
 ├── docs/                    # tài liệu theo từng concern
 ├── powerbi/                 # Power BI artifact
-├── tests/                   # unit, Spark integration, e2e/invariants
+├── scripts/                 # contract validation và pipeline smoke test
+├── tests/                   # unit, Spark integration, fixture và invariants
 ├── .github/workflows/       # CI Ruff + PySpark + Delta
-├── requirements.txt
 ├── pyproject.toml
 └── README.md
 ```
 
 ## Hướng dẫn cài đặt và chạy thử nghiệm
 
-Yêu cầu: Python 3.10+, Java 17, PySpark 3.5.x và Delta Lake 3.2–3.3.
+Yêu cầu: Python 3.11, Java 17, PySpark 3.5.x và Delta Lake 3.2–3.3.
 
 ```powershell
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
 python -m pip install --upgrade pip
-python -m pip install -r requirements.txt
+python -m pip install -e ".[dev]"
 ```
 
 Đường dẫn mặc định là `Data/EcommerceSalesDataset.csv` và Delta được ghi vào
@@ -266,6 +292,16 @@ Chạy lại cùng incremental file sẽ dùng content hash để trả `SKIPPED
 trước đã thành công. Run `FAILED` có thể retry; Bronze commit đã hoàn tất sẽ
 được đọc lại thay vì append lần hai.
 
+Để kiểm tra nhanh toàn bộ luồng mà không đụng `Output/lakehouse` hiện tại:
+
+```powershell
+python scripts/run_demo_pipeline.py
+```
+
+Script dùng fixture 3 dòng cho batch đầu, 3 dòng cho batch sau, kiểm tra update,
+DELETE, fact order không nhân `Shipping_Cost`, serving snapshot và replay khác tên
+file nhưng cùng content hash.
+
 ### CLI tiện ích
 
 ```powershell
@@ -286,16 +322,17 @@ Chạy các kiểm tra nhanh trước khi mở pull request:
 
 ```powershell
 python -m ruff check SourceCode tests scripts
-python -m ruff format --check SourceCode/lakehouse SourceCode/project_cli.py
+python -m ruff format --check SourceCode tests scripts
 python scripts/validate_contracts.py
 python -m pytest -q
 ```
 
 Workflow [`.github/workflows/quality.yml`](.github/workflows/quality.yml) gồm:
 
-1. `fast-checks`: cài PyYAML/Ruff, lint, format và validate toàn bộ YAML contract.
-2. `spark-integration`: cài Java 17, PySpark, Delta Lake, chạy toàn bộ tests,
-   validate seed, bootstrap Gold và dựng business report từ published snapshot.
+1. `fast-checks`: cài project từ `pyproject.toml`, lint, format toàn bộ source,
+   validate YAML và chạy nhóm Python-only tests.
+2. `spark-integration`: cài Java 17, chạy toàn bộ tests, validate seed, bootstrap
+   Gold, dựng business report từ published snapshot và chạy smoke test incremental.
 
 Integration tests không được `skip` khi thiếu PySpark hoặc Delta; thiếu dependency
 phải làm job thất bại để CI phản ánh đúng chất lượng repository.

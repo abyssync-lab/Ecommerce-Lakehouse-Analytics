@@ -25,6 +25,29 @@ def test_current_event_snapshot_keeps_latest_non_deleted_line(spark_session):
     assert [(row["Order_Line_ID"], row["Net_Line_Amount"]) for row in rows] == [("L1", 120.0)]
 
 
+def test_latest_delete_is_selected_before_tombstone_filter(spark_session):
+    """Bản DELETE mới nhất phải loại line, không để UPSERT cũ hồi sinh dữ liệu."""
+    events = spark_session.createDataFrame(
+        [
+            ("A001", "L1", "2026-08-01 10:00:00", "UPSERT", False, 100.0),
+            ("A001", "L1", "2026-08-01 11:00:00", "UPSERT", False, 200.0),
+            ("A001", "L1", "2026-08-01 12:00:00", "DELETE", True, 200.0),
+        ],
+        [
+            "Order_ID",
+            "Order_Line_ID",
+            "Source_Updated_At",
+            "Operation",
+            "Is_Deleted",
+            "Net_Line_Amount",
+        ],
+    ).withColumn("Source_Updated_At", col("Source_Updated_At").cast("timestamp"))
+
+    current = build_silver_current_events(events)
+
+    assert current.count() == 0
+
+
 def test_invalid_event_time_is_quarantined(spark_session, tmp_path):
     """Sự kiện có Order_Date sau Source_Updated_At không được vào Silver."""
     events = spark_session.createDataFrame(

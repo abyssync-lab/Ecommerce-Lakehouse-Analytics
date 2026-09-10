@@ -1,9 +1,49 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ecommerce-lakehouse-analytics"
+version = "0.1.0"
+description = "Incremental order and fulfillment lakehouse pipeline with PySpark and Delta Lake."
+readme = "README.md"
+requires-python = ">=3.11,<3.13"
+dependencies = [
+    "pyspark>=3.5,<3.6",
+    "delta-spark>=3.2,<3.4",
+    "pandas>=2.0,<3.0",
+    "PyYAML>=6.0,<7.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0,<9.0",
+    "ruff>=0.16,<0.17",
+]
+
+[tool.setuptools]
+package-dir = {"" = "SourceCode"}
+py-modules = [
+    "analytics_rules",
+    "build_business_report",
+    "business_metrics",
+    "config",
+    "data_quality",
+    "environment_check",
+    "project_cli",
+    "SparkEcommerceAnalysis",
+    "validate_input",
+]
+
+[tool.setuptools.packages.find]
+where = ["SourceCode"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q -p no:cacheprovider"
 
 [tool.ruff]
-target-version = "py310"
+target-version = "py311"
 line-length = 100
 exclude = ["SourceCode/metastore_db", "SourceCode/spark-warehouse"]
 

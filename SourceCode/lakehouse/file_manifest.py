@@ -7,7 +7,7 @@ Một file có thể có nhiều run do retry, nhưng chỉ được commit vào
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 from config import SETTINGS
@@ -53,7 +53,7 @@ class FileManifest:
     @staticmethod
     def _now() -> datetime:
         """Dùng timestamp UTC không timezone để tương thích Spark TimestampType."""
-        return datetime.now(timezone.utc).replace(tzinfo=None)
+        return datetime.now(UTC).replace(tzinfo=None)
 
     def _exists(self) -> bool:
         """Kiểm tra manifest và chặn schema cũ thay vì tự merge mù quáng."""
