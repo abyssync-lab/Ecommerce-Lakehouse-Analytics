@@ -13,35 +13,11 @@ from typing import TYPE_CHECKING, Literal
 if TYPE_CHECKING:
     import pandas as pd
 
-try:
-    from lakehouse.contracts.loader import load_contract
+from lakehouse.contracts.loader import load_contract
 
-    _CONTRACT = load_contract()
-    REQUIRED_COLUMNS: set[str] = _CONTRACT.required_columns
-    ALLOWED_ORDER_STATUSES: set[str] = _CONTRACT.allowed_order_statuses
-except Exception:
-    REQUIRED_COLUMNS: set[str] = {
-        "Order_ID",
-        "Order_Date",
-        "Customer_ID",
-        "Product_Name",
-        "Quantity",
-        "Unit_Price",
-        "Discount",
-        "Revenue",
-        "Cost",
-        "Profit",
-        "Shipping_Cost",
-        "Shipping_Days",
-        "Order_Status",
-    }
-    ALLOWED_ORDER_STATUSES: set[str] = {
-        "Delivered",
-        "Returned",
-        "Cancelled",
-        "Processing",
-        "Shipped",
-    }
+_CONTRACT = load_contract()
+REQUIRED_COLUMNS: set[str] = _CONTRACT.required_columns
+ALLOWED_ORDER_STATUSES: set[str] = _CONTRACT.allowed_order_statuses
 
 GOLD_COLUMNS: set[str] = {
     "Order_ID",
@@ -81,7 +57,7 @@ class QualityReportSummary:
     results: list[QualityResult]
 
     def __iter__(self) -> Iterator[QualityResult]:
-        """Hỗ trợ duyệ t từng QualityResult để tương thích ngược với code kiểm thử cũ."""
+        """Hỗ trợ duyệt từng QualityResult cho các consumer hiện tại."""
         return iter(self.results)
 
     @property

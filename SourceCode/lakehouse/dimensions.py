@@ -205,7 +205,10 @@ def build_dim_geography(clean_df: Any) -> Any:
     """Xây dựng geography dimension ở grain Region-Country."""
     dim = clean_df.select("Region", "Country").dropDuplicates()
     dim = add_surrogate_key(dim, "GeographyKey", ["Region", "Country"])
-    return dim.select("GeographyKey", "Region", "Country")
+    dim = dim.select("GeographyKey", "Region", "Country")
+    unknown = clean_df.sparkSession.createDataFrame([(0, "Unknown", "Unknown")], dim.schema)
+    actual = dim.filter(~((col("Region") == "Unknown") & (col("Country") == "Unknown")))
+    return unknown.unionByName(actual)
 
 
 def build_dim_order_context(clean_df: Any) -> Any:
@@ -218,7 +221,19 @@ def build_dim_order_context(clean_df: Any) -> Any:
     ]
     dim = clean_df.select(*context_columns).dropDuplicates()
     dim = add_surrogate_key(dim, "ContextKey", context_columns)
-    return dim.select("ContextKey", *context_columns)
+    dim = dim.select("ContextKey", *context_columns)
+    unknown = clean_df.sparkSession.createDataFrame(
+        [(0, "Unknown", "Unknown", "Unknown", "Unknown")], dim.schema
+    )
+    actual = dim.filter(
+        ~(
+            (col("Order_Status") == "Unknown")
+            & (col("Payment_Method") == "Unknown")
+            & (col("Shipping_Method") == "Unknown")
+            & (col("Delivery_Level") == "Unknown")
+        )
+    )
+    return unknown.unionByName(actual)
 
 
 def build_dim_date(spark: Any, clean_df: Any) -> Any:

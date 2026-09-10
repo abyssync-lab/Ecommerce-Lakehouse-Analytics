@@ -167,6 +167,17 @@ def clean_and_enrich_silver(
     ]:
         if optional_text not in typed_df.columns:
             typed_df = typed_df.withColumn(optional_text, lit("Unknown"))
+    # Chuẩn hóa thuộc tính dùng làm khóa dimension. Spark không match được
+    # NULL = NULL trong phép join, vì vậy giá trị thiếu phải đi vào unknown
+    # member thay vì tạo foreign key NULL ở Gold.
+    for dimension_text in ["Payment_Method", "Shipping_Method", "Region", "Country"]:
+        typed_df = typed_df.withColumn(
+            dimension_text,
+            when(
+                col(dimension_text).isNull() | (trim(col(dimension_text)) == ""),
+                lit("Unknown"),
+            ).otherwise(trim(col(dimension_text))),
+        )
     for required_text in ["Customer_ID", "Order_Status"]:
         if required_text not in typed_df.columns:
             # Không gán Unknown cho khóa/semantic status bắt buộc của UPSERT;

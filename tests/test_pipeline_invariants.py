@@ -195,6 +195,17 @@ def test_gold_sales_enriched_and_marts_consistency(spark_session):
     dims = build_all_dimensions(spark_session, clean_df)
     fact = build_fact_sales(clean_df, dims)
 
+    assert set(dims) == {
+        "dim_date",
+        "dim_product",
+        "dim_customer",
+        "dim_geography",
+        "dim_order_context",
+    }
+    assert {"GeographyKey", "ContextKey"}.issubset(set(fact.columns))
+    assert dims["dim_geography"].filter(col("GeographyKey") == 0).count() == 1
+    assert dims["dim_order_context"].filter(col("ContextKey") == 0).count() == 1
+
     enriched = build_sales_enriched(fact, dims)
     assert enriched.count() == fact.count()
     assert "Order_Date" in enriched.columns

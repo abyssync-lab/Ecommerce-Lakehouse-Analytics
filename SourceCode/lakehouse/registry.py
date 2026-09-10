@@ -82,7 +82,7 @@ class BatchRegistry:
     def __init__(self, spark: Any, registry_path: str | None = None) -> None:
         self.spark = spark
         self.registry_path = registry_path or SETTINGS.get_storage_path(
-            SETTINGS.ingestion_batches_delta
+            SETTINGS.pipeline_runs_delta
         )
 
     def _delta_exists(self) -> bool:

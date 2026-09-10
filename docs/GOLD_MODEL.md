@@ -10,8 +10,8 @@ Bronze vẫn là nguồn audit, không được dùng trực tiếp làm nguồn
 
 ### dim_date
 
-Một row cho ngày: DateKey, FullDate, Year, Quarter, Month, MonthName, WeekOfYear,
-DayOfWeek và IsWeekend.
+Một row cho ngày: `DateKey`, `FullDate`, `Year`, `Month` và `Quarter`. Đây là
+đúng tập cột mà `build_dim_date()` sinh ra cho Gold hiện tại.
 
 ### dim_product
 
@@ -39,6 +39,8 @@ cardinality thấp `Order_Status`, `Payment_Method`, `Shipping_Method` và
 `Delivery_Level` được gộp trong `dim_order_context`. Cả
 fact line và fact order cùng dùng `GeographyKey` và `ContextKey`, nên mô hình
 không tạo các dimension nhỏ trùng lặp chỉ vì mỗi thuộc tính có một bảng riêng.
+Giá trị thiếu được chuẩn hóa thành `Unknown`; unknown member có surrogate key `0`
+để fact không phát sinh foreign key null.
 
 ## Fact sales line
 

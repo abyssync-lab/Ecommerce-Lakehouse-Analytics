@@ -6,14 +6,11 @@ và Business Keys từ file `contracts/ecommerce_order.yaml`.
 
 from __future__ import annotations
 
-import logging
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 import yaml
-
-LOGGER = logging.getLogger(__name__)
 
 DEFAULT_CONTRACT_PATH = Path(__file__).resolve().parents[3] / "contracts" / "ecommerce_order.yaml"
 CHANGE_CONTRACT_PATH = (
@@ -110,10 +107,10 @@ def load_contract(contract_path: str | Path | None = None) -> DatasetContract:
         return _CACHED_CONTRACT
 
     if not target_path.exists():
-        LOGGER.warning(
-            "Không tìm thấy file contract tại %s, sử dụng fallback mặc định.", target_path
+        raise FileNotFoundError(
+            f"Không tìm thấy file contract tại {target_path}; "
+            "pipeline không được chạy khi thiếu executable contract."
         )
-        return _create_fallback_contract()
 
     with open(target_path, encoding="utf-8") as f:
         data = yaml.safe_load(f)
@@ -232,44 +229,3 @@ def get_spark_silver_rules(contract: DatasetContract | None = None) -> dict[str,
             )
 
     return rules
-
-
-def _create_fallback_contract() -> DatasetContract:
-    """Tạo fallback contract khi file yaml không thể nạp (đảm bảo an toàn runtime)."""
-    return DatasetContract(
-        version="1.0.0",
-        dataset="ecommerce_order",
-        grain="one product line item within one customer order",
-        description="Fallback contract",
-        columns={
-            "Order_ID": ColumnContract("Order_ID", "string", nullable=False),
-            "Order_Date": ColumnContract("Order_Date", "date", nullable=False),
-            "Customer_ID": ColumnContract("Customer_ID", "string", nullable=False),
-            "Product_Name": ColumnContract("Product_Name", "string", nullable=False),
-            "Quantity": ColumnContract("Quantity", "integer", nullable=False, min=1),
-            "Unit_Price": ColumnContract("Unit_Price", "double", nullable=False, min=0.0),
-            "Discount": ColumnContract("Discount", "double", nullable=False, min=0.0, max=1.0),
-            "Revenue": ColumnContract("Revenue", "double", nullable=False, min=0.0),
-            "Cost": ColumnContract("Cost", "double", nullable=False, min=0.0),
-            "Profit": ColumnContract("Profit", "double", nullable=False),
-            "Shipping_Cost": ColumnContract("Shipping_Cost", "double", nullable=False, min=0.0),
-            "Shipping_Days": ColumnContract("Shipping_Days", "integer", nullable=False, min=0),
-            "Order_Status": ColumnContract(
-                "Order_Status",
-                "string",
-                nullable=False,
-                allowed_values=["Delivered", "Returned", "Cancelled", "Processing", "Shipped"],
-            ),
-        },
-        business_keys={
-            "order_key": ["Order_ID"],
-            "order_line_key": ["Order_ID", "Order_Line_ID"],
-            "fallback_line_fingerprint": [
-                "Order_ID",
-                "Product_Name",
-                "Quantity",
-                "Unit_Price",
-                "Discount",
-            ],
-        },
-    )

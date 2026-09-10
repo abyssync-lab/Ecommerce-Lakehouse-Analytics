@@ -98,20 +98,31 @@ def reconcile_fact_grain_uniqueness(fact_sales: Any) -> dict[str, Any]:
     }
 
 
-def reconcile_fk_completeness(fact_sales: Any) -> dict[str, Any]:
-    """Kiểm tra toàn vẹn khóa ngoại trong FactSales (Không được có orphan/null foreign keys)."""
-    fk_cols = [
-        "CustomerKey",
-        "ProductKey",
-        "DateKey",
-        "GeographyKey",
-        "ContextKey",
-    ]
+def reconcile_fk_completeness(
+    fact_sales: Any, fact_order_fulfillment: Any | None = None
+) -> dict[str, Any]:
+    """Kiểm tra foreign key của cả line fact và order fact."""
+    fact_key_sets = {
+        "fact_sales_line": ["CustomerKey", "ProductKey", "DateKey", "GeographyKey", "ContextKey"]
+    }
+    if fact_order_fulfillment is not None:
+        fact_key_sets["fact_order_fulfillment"] = [
+            "CustomerKey",
+            "DateKey",
+            "GeographyKey",
+            "ContextKey",
+        ]
     null_counts: dict[str, int] = {}
-    for fk in fk_cols:
-        if fk in fact_sales.columns:
-            cnt = fact_sales.filter(col(fk).isNull()).count()
-            null_counts[fk] = cnt
+    fact_frames = {
+        "fact_sales_line": fact_sales,
+        "fact_order_fulfillment": fact_order_fulfillment,
+    }
+    for fact_name, fk_cols in fact_key_sets.items():
+        dataframe = fact_frames[fact_name]
+        for fk in fk_cols:
+            if fk in dataframe.columns:
+                cnt = dataframe.filter(col(fk).isNull()).count()
+                null_counts[f"{fact_name}.{fk}"] = cnt
 
     total_nulls = sum(null_counts.values())
     return {
@@ -248,7 +259,7 @@ def run_full_reconciliation(
         duplicate_count=duplicate_count,
     )
     grain_check = reconcile_fact_grain_uniqueness(fact_sales)
-    fk_check = reconcile_fk_completeness(fact_sales)
+    fk_check = reconcile_fk_completeness(fact_sales, fact_order_fulfillment)
     scd2_check = reconcile_scd2_temporal_integrity(dim_customer)
     silver_grain_check = reconcile_current_state_grain(
         silver_orders_current, silver_order_lines_current

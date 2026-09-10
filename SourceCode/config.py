@@ -76,7 +76,7 @@ class Settings:
 
     # Đường dẫn các tầng Medallion Lakehouse trên local filesystem.
     bronze_delta: str = "/ecommerce/bronze/ecommerce_raw_delta"
-    ingestion_batches_delta: str = "/ecommerce/bronze/ingestion_batches_delta"
+    pipeline_runs_delta: str = "/ecommerce/control/ctl_pipeline_runs_delta"
     ingestion_files_delta: str = "/ecommerce/control/ctl_ingestion_files_delta"
     silver_delta: str = "/ecommerce/silver/ecommerce_clean_delta"
     silver_orders_delta: str = "/ecommerce/silver/silver_orders_current_delta"

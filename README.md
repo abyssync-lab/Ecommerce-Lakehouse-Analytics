@@ -2,7 +2,7 @@
 
 End-to-end batch lakehouse xử lý incremental order events từ OMS bằng PySpark +
 Delta Lake. Pipeline đảm bảo idempotency, event ordering, quarantine,
-reconciliation và publication theo snapshot trước khi dữ liệu được Power BI sử dụng.
+reconciliation và atomic snapshot publication trước khi dữ liệu được Power BI sử dụng.
 
 [![Python](https://img.shields.io/badge/Python-3.10%2B-3776AB.svg)](https://www.python.org/)
 [![Apache Spark](https://img.shields.io/badge/Apache%20Spark-3.5-E25A1C.svg)](https://spark.apache.org/)
@@ -26,7 +26,7 @@ reconciliation và publication theo snapshot trước khi dữ liệu được P
 | Mô hình | Kimball dimensions, line fact, order fact và marts |
 | Chất lượng | File validation, row quarantine, duplicate accounting, reconciliation |
 | Serving | Published Gold snapshot qua view cho Power BI |
-| CI/CD | GitHub Actions: Ruff, contract checks, PySpark + Delta tests |
+| CI | GitHub Actions: Ruff, contract checks, PySpark + Delta tests |
 
 ## Bài toán và phạm vi ứng dụng (Problem & Scope)
 
@@ -179,6 +179,7 @@ logic Spark nằm trong [`SourceCode/lakehouse/marts.py`](SourceCode/lakehouse/m
 | Sequence conflict | Cả payload conflict vào Quarantine |
 | Silver/Fact financial | Tổng `Net_Line_Amount` bằng nhau |
 | Silver grain | Duy nhất order và `(Order_ID, Order_Line_ID)` |
+| Dimension FK | Không null; thuộc tính thiếu đi vào unknown member `key=0` |
 | Failed Gold run | Không đổi `current_run_id` đang dùng bởi Power BI |
 
 Không có reject-rate 5% hard-code trong core pipeline. File sai schema hoặc
@@ -279,7 +280,7 @@ Báo cáo mặc định đọc `serving.gold_sales_enriched` và
 làm nguồn dashboard. Power BI artifact nằm tại
 [`powerbi/GlobalCart_Analytics.pbix`](powerbi/GlobalCart_Analytics.pbix).
 
-## Kiểm tra code và CI/CD
+## Kiểm tra code và CI
 
 Chạy các kiểm tra nhanh trước khi mở pull request:
 
