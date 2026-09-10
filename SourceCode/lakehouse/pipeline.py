@@ -694,7 +694,7 @@ def run_incremental_pipeline(
                 col("source._record_hash") == col("target._target_record_hash")
             )
 
-                # Cùng key và cùng timestamp với trạng thái hiện hành nhưng khác nội dung là
+            # Cùng key và cùng timestamp với trạng thái hiện hành nhưng khác nội dung là
             # sequence conflict ở cấp lịch sử, không được âm thầm bỏ qua.
             historical_conflict_condition = (
                 target_exists
