@@ -1,8 +1,7 @@
-"""Sổ cái file nguồn của control plane.
+"""Sổ theo dõi việc commit file nguồn vào Bronze.
 
-`ctl_ingestion_files` trả lời một câu hỏi khác với `ctl_pipeline_runs`:
-file này đã được ghi vào Bronze hay chưa? Một file có thể có nhiều run do
-retry, nhưng chỉ được commit vào Bronze đúng một lần theo
+Bảng này trả lời một câu hỏi kỹ thuật: file đã được ghi vào Bronze hay chưa?
+Một file có thể có nhiều run do retry, nhưng chỉ được commit vào Bronze một lần theo
 `source_system + source_hash`.
 """
 

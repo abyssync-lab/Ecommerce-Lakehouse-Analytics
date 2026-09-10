@@ -32,12 +32,13 @@ Customer_Gender
 Attribute_Hash được tính từ các thuộc tính này. SCD2 có ValidFrom, ValidTo,
 Is_Current và khóa CustomerKey persistent.
 
-### dim_location và context
+### dim_geography và dim_order_context
 
-dim_location giữ Region/Country. Pipeline hiện tại cũng tạo dim_payment,
-dim_shipping và dim_order_status để giữ các khóa nghiệp vụ tương thích. Context
-gom các thuộc tính cardinality thấp như Order_Status, Payment_Method và
-Shipping_Method ở semantic layer.
+`dim_geography` giữ Region/Country ở một natural key ổn định. Các thuộc tính
+cardinality thấp `Order_Status`, `Payment_Method`, `Shipping_Method` và
+`Delivery_Level` được gộp trong `dim_order_context`. Cả
+fact line và fact order cùng dùng `GeographyKey` và `ContextKey`, nên mô hình
+không tạo các dimension nhỏ trùng lặp chỉ vì mỗi thuộc tính có một bảng riêng.
 
 ## Fact sales line
 
@@ -106,7 +107,7 @@ Policy được đọc từ contracts/business_metrics.yaml:
 
 Không dùng average của phần trăm margin theo row.
 
-## Certified marts
+## Gold marts hiện tại
 
 | Mart | Grain | Mục đích |
 |---|---|---|

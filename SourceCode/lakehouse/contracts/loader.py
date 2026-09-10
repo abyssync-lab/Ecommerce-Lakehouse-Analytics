@@ -161,7 +161,7 @@ def detect_contract_path(columns: set[str] | list[str]) -> Path:
     """Chọn contract theo shape của file, không đoán theo tên file.
 
     Event contract v2 có ba cột nhận diện bắt buộc. Các file historical hiện tại
-    không có chúng và tiếp tục đi qua contract bootstrap v1 để giữ backward compatibility.
+    không có chúng và tiếp tục đi qua contract bootstrap cho seed lịch sử.
     """
     column_set = set(columns)
     if {"Order_Line_ID", "Source_Updated_At", "Operation"}.issubset(column_set):
@@ -191,7 +191,7 @@ def get_spark_raw_schema(contract: DatasetContract | None = None) -> Any:
 
 def get_spark_silver_rules(contract: DatasetContract | None = None) -> dict[str, Any]:
     """Sinh biểu thức kiểm định chất lượng (PySpark Column expressions) từ contract."""
-    from pyspark.sql.functions import col
+    from pyspark.sql.functions import col, lit
 
     c = contract or load_contract()
     rules: dict[str, Any] = {}
@@ -200,21 +200,34 @@ def get_spark_silver_rules(contract: DatasetContract | None = None) -> dict[str,
         if not col_contract.nullable and col_name != "Order_Line_ID":
             rules[f"{col_name} không rỗng"] = col(col_name).isNotNull()
 
+        # Cột nullable chỉ bị kiểm tra khi có giá trị. Nếu không bọc biểu thức
+        # bằng isNull(), Spark sẽ trả về NULL và validate_silver_data sẽ hiểu
+        # nhầm đó là một lỗi của event v2.
+        nullable_ok = col(col_name).isNull() if col_contract.nullable else lit(False)
+
         if col_contract.min is not None:
             if col_contract.min == 0.0:
-                rules[f"{col_name} >= 0"] = col(col_name) >= 0
+                condition = col(col_name) >= 0
             elif col_contract.min == 1:
-                rules[f"{col_name} > 0"] = col(col_name) > 0
+                condition = col(col_name) > 0
             else:
-                rules[f"{col_name} >= {col_contract.min}"] = col(col_name) >= col_contract.min
+                condition = col(col_name) >= col_contract.min
+            rule_name = (
+                f"{col_name} >= 0"
+                if col_contract.min == 0.0
+                else f"{col_name} > 0"
+                if col_contract.min == 1
+                else f"{col_name} >= {col_contract.min}"
+            )
+            rules[rule_name] = nullable_ok | condition
 
         if col_contract.max is not None and col_contract.min is not None:
-            rules[f"{col_name} trong [{col_contract.min}, {col_contract.max}]"] = col(
+            rules[f"{col_name} trong [{col_contract.min}, {col_contract.max}]"] = nullable_ok | col(
                 col_name
             ).between(col_contract.min, col_contract.max)
 
         if col_contract.allowed_values:
-            rules[f"{col_name} thuộc danh sách hợp lệ"] = col(col_name).isin(
+            rules[f"{col_name} thuộc danh sách hợp lệ"] = nullable_ok | col(col_name).isin(
                 col_contract.allowed_values
             )
 

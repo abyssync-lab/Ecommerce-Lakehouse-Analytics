@@ -1,6 +1,6 @@
 """Module kiểm tra chẩn đoán môi trường hệ thống (System Environment Doctor).
 
-Xác minh tính khả dụng của Java, Hadoop HDFS CLI, Python, Pandas, PySpark, Delta Lake và PyMongo
+Xác minh tính khả dụng của Java, Python, Pandas, PySpark và Delta Lake.
 trước khi khởi chạy các quy trình xử lý dữ liệu.
 """
 
@@ -32,7 +32,7 @@ def command_status(command: str, required_for: str) -> DependencyStatus:
     """Kiểm tra sự tồn tại của một lệnh thực thi (Command-line Utility) trong PATH.
 
     Args:
-        command: Tên lệnh cần tìm (ví dụ: 'java', 'hdfs').
+        command: Tên lệnh cần tìm (ví dụ: 'java').
         required_for: Mô tả mục đích sử dụng.
 
     Returns:
@@ -67,18 +67,16 @@ def module_status(module: str, required_for: str) -> DependencyStatus:
 
 
 def inspect_environment() -> list[DependencyStatus]:
-    """Kiểm tra toàn bộ danh sách phụ thuộc cho hệ thống GlobalCart Intelligence.
+    """Kiểm tra các phụ thuộc cần thiết cho GlobalCart Order Lakehouse.
 
     Returns:
         Danh sách chứa trạng thái của từng phần mềm/thư viện.
     """
     return [
         command_status("java", "Spark & Hadoop Core"),
-        command_status("hdfs", "Hadoop HDFS Storage CLI"),
-        module_status("pandas", "Xử lý dữ liệu & Báo cáo Portfolio"),
+        module_status("pandas", "Xử lý dữ liệu & báo cáo KPI"),
         module_status("pyspark", "PySpark Engine & Medallion Pipeline"),
         module_status("delta", "Delta Lake Storage Format"),
-        module_status("pymongo", "Đồng bộ MongoDB Serving Database"),
     ]
 
 

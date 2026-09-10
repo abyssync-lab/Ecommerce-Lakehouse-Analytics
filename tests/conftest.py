@@ -2,6 +2,7 @@
 
 import os
 import sys
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -31,6 +32,9 @@ def spark_session():
         .config("spark.sql.catalog.spark_catalog", "org.apache.spark.sql.delta.catalog.DeltaCatalog")
         .config("spark.sql.shuffle.partitions", "2")
         .config("spark.ui.enabled", "false")
+        # Delta dùng Ivy để tải JAR. Ép cache vào thư mục temp có quyền ghi để
+        # test chạy ổn định cả trên Windows sandbox và GitHub-hosted runner.
+        .config("spark.jars.ivy", str(Path(tempfile.gettempdir()) / "globalcart-ivy2"))
     )
 
     # Hàm này vừa đăng ký Delta extensions vừa thêm đúng JAR tương thích với PySpark.

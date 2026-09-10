@@ -9,9 +9,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout source
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v7
         with:
           python-version: "3.11"
           cache: pip
@@ -25,12 +25,12 @@ jobs:
           SourceCode/lakehouse
           SourceCode/analytics_rules.py
           SourceCode/data_quality.py
-          SourceCode/generate_portfolio_report.py
-          SourceCode/portfolio_metrics.py
+          SourceCode/build_business_report.py
+          SourceCode/business_metrics.py
           SourceCode/SparkEcommerceAnalysis.py
           SourceCode/project_cli.py
           tests/test_current_state.py
-          tests/test_portfolio_metrics.py
+          tests/test_business_metrics.py
       - name: Validate YAML contracts
         run: python scripts/validate_contracts.py
 
@@ -38,20 +38,19 @@ jobs:
     needs: fast-checks
     runs-on: ubuntu-latest
     env:
-      ECOMMERCE_USE_LOCAL_STORAGE: "true"
       SPARK_LOCAL_IP: 127.0.0.1
       SPARK_LOCAL_HOSTNAME: localhost
       PYSPARK_PYTHON: python
     steps:
       - name: Checkout source
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v7
         with:
           python-version: "3.11"
           cache: pip
       - name: Set up Java for Spark
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v6
         with:
           distribution: temurin
           java-version: "17"
@@ -61,7 +60,7 @@ jobs:
         run: python -m pytest
       - name: Validate sample data contract
         run: python SourceCode/validate_input.py Data/EcommerceSalesDataset.csv
-      - name: Build certified Gold snapshot for report validation
+      - name: Build published Gold snapshot for report validation
         run: python SourceCode/SparkEcommerceAnalysis.py --input Data/EcommerceSalesDataset.csv
-      - name: Rebuild portfolio business report
-        run: python SourceCode/generate_portfolio_report.py --source published
+      - name: Rebuild business report from published Gold
+        run: python SourceCode/build_business_report.py --source published

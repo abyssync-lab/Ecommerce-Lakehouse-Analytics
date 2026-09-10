@@ -77,14 +77,14 @@ def _filter_metric_rows(dataframe: pd.DataFrame, metric: str) -> pd.DataFrame:
     return dataframe[dataframe["Order_Status"].isin(statuses)].copy()
 
 
-def _measure_column(dataframe: pd.DataFrame, certified_name: str, legacy_name: str) -> str:
+def _measure_column(dataframe: pd.DataFrame, gold_name: str, fallback_name: str) -> str:
     """Chọn measure đã chứng nhận trước measure nguồn tương thích ngược."""
-    if certified_name in dataframe.columns:
-        return certified_name
-    if legacy_name in dataframe.columns:
-        return legacy_name
+    if gold_name in dataframe.columns:
+        return gold_name
+    if fallback_name in dataframe.columns:
+        return fallback_name
     raise ValueError(
-        f"Thiếu measure {certified_name}; dữ liệu cũng không có cột tương thích {legacy_name}"
+        f"Thiếu measure {gold_name}; dữ liệu cũng không có cột dự phòng {fallback_name}"
     )
 
 

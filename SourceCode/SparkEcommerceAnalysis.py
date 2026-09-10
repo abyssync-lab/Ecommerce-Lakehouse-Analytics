@@ -19,12 +19,7 @@ import uuid
 from config import SETTINGS
 from lakehouse.file_manifest import FileManifest
 from lakehouse.ingestion import calculate_source_hash, calculate_source_size, read_raw_csv
-from lakehouse.pipeline import (
-    create_spark_session,
-    run_delta_demo,
-    run_incremental_pipeline,
-    run_pipeline,
-)
+from lakehouse.pipeline import create_spark_session, run_incremental_pipeline, run_pipeline
 from lakehouse.registry import BatchRegistry
 
 
@@ -37,9 +32,6 @@ def main() -> None:
         "--incremental", action="store_true", default=False, help="Chạy chế độ Incremental MERGE"
     )
     parser.add_argument("--batch-id", type=str, default=None, help="Mã nhận diện batch nạp")
-    parser.add_argument(
-        "--demo", action="store_true", default=False, help="Chạy Delta Lakehouse Demos"
-    )
     args = parser.parse_args()
 
     use_scd2 = args.scd2 if args.scd2 is not None else SETTINGS.use_scd2
@@ -106,8 +98,6 @@ def main() -> None:
         active_spark = result.spark
 
     if active_spark is not None:
-        if args.demo or SETTINGS.run_delta_demo:
-            run_delta_demo(active_spark)
         active_spark.stop()
 
 

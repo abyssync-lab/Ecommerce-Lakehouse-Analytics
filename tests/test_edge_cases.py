@@ -1,4 +1,4 @@
-"""Unit tests mở rộng kiểm thử toàn bộ trường hợp biên (Edge Cases) cho Data Quality Gate, RFM và ABC."""
+"""Unit tests cho các trường hợp biên của validation, RFM và ABC."""
 
 from __future__ import annotations
 

@@ -1,23 +1,17 @@
-"""Module quản lý lưu trữ Delta Lake, Hive Metastore Registration và kiểm tra tính năng Lakehouse."""
+"""Các helper ghi Delta dùng chung cho các tầng của pipeline."""
 
 from __future__ import annotations
 
-import logging
 from typing import Any
 
 from config import SETTINGS
 
-try:
-    from delta.tables import DeltaTable
-except ImportError:
-    DeltaTable = None
-
-LOGGER = logging.getLogger(__name__)
-
 
 def resolve_path(relative_path: str) -> str:
-    """Ghép đường dẫn lưu trữ đầy đủ (Local File URL hoặc HDFS URL)."""
-    if relative_path.startswith(("file://", "hdfs://")):
+    """Ghép đường dẫn file URI cho một bảng Delta local."""
+    if "://" in relative_path and not relative_path.startswith("file://"):
+        raise ValueError("V1 chỉ hỗ trợ Delta trên local filesystem")
+    if relative_path.startswith("file://"):
         return relative_path
     return SETTINGS.get_storage_path(relative_path)
 
@@ -47,79 +41,3 @@ def save_and_verify_delta(
     save_delta(dataframe, path, mode=mode)
     if not check_delta_log_exists(dataframe.sparkSession, path):
         raise RuntimeError(f"{table_label} tại {path} không tạo được _delta_log!")
-    LOGGER.info("Xác nhận ghi Delta Table thành công (%s): %s tại %s", mode, table_label, path)
-
-
-def register_hive_table(spark: Any, path: str, table_name: str) -> None:
-    """Đăng ký Delta Table vào Hive Metastore để phục vụ Thrift Server / Power BI."""
-    hive_db = SETTINGS.hive_database
-    spark.sql(f"CREATE DATABASE IF NOT EXISTS {hive_db}")
-    spark.sql(f"""
-        CREATE TABLE IF NOT EXISTS {hive_db}.{table_name}
-        USING DELTA
-        LOCATION '{resolve_path(path)}'
-    """)
-    LOGGER.info("Đã đăng ký Hive table: %s.%s", hive_db, table_name)
-
-
-def persist_tables(spark: Any, tables: dict[str, Any], base_path: str, layer_name: str) -> None:
-    """Lưu và đăng ký một nhóm bảng Delta theo chuẩn chung."""
-    for table_name, dataframe in tables.items():
-        delta_path = f"{base_path}/{table_name}_delta"
-        save_and_verify_delta(dataframe, delta_path, f"{layer_name}.{table_name}")
-        register_hive_table(spark, delta_path, table_name)
-
-
-def show_delta_history(spark: Any, path: str, table_name: str) -> None:
-    """Hiển thị lịch sử phiên bản (Version History) của Delta Table."""
-    if DeltaTable is None:
-        LOGGER.warning("Thư viện delta-spark chưa được nạp, bỏ qua hiển thị Delta History.")
-        return
-    LOGGER.info("=== DELTA HISTORY: %s ===", table_name)
-    delta_table = DeltaTable.forPath(spark, resolve_path(path))
-    delta_table.history().show(truncate=False)
-
-
-def check_schema_enforcement(spark: Any, test_path: str | None = None) -> None:
-    """Thử nghiệm tính năng Schema Enforcement của Delta Lake trên bảng thử nghiệm độc lập.
-
-    Tuyệt đối không chạy test này trên bảng Silver / Gold production để tránh rủi ro ghi dữ liệu sai.
-    """
-    LOGGER.info("=== KIỂM TRA SCHEMA ENFORCEMENT TRÊN BẢNG THỬ NGHIỆM CÔ LẬP ===")
-    target_path = resolve_path(test_path or SETTINGS.temp_test_delta)
-
-    # 1. Tạo bảng mẫu hợp lệ ban đầu (Revenue là kiểu Double)
-    base_df = spark.createDataFrame([("ORDER_BASE_001", 150.0)], ["Order_ID", "Revenue"])
-    base_df.write.format("delta").mode("overwrite").option("overwriteSchema", "true").save(
-        target_path
-    )
-
-    # 2. Thử nghiệm append dữ liệu với kiểu dữ liệu xung đột (Revenue là String 'SAI_SCHEMA')
-    wrong_schema_df = spark.createDataFrame(
-        [("BAD_ORDER_001", "SAI_SCHEMA")], ["Order_ID", "Revenue"]
-    )
-    try:
-        wrong_schema_df.write.format("delta").mode("append").save(target_path)
-        LOGGER.warning("CẢNH BÁO: Dữ liệu sai schema đã ghi được. Cần kiểm tra lại cấu hình Delta.")
-    except Exception as e:
-        LOGGER.info("THÀNH CÔNG: Delta Lake đã từ chối ghi dữ liệu sai schema (%s)", str(e)[:200])
-
-
-def check_versioning_and_time_travel(spark: Any, clean_df: Any) -> None:
-    """Thử nghiệm tính năng Versioning & Time Travel của Delta Lake."""
-    LOGGER.info("=== KIỂM TRA VERSIONING VÀ TIME TRAVEL ===")
-    version_path = SETTINGS.lakehouse_version_delta
-
-    save_delta(clean_df.limit(50), version_path, mode="overwrite")
-    clean_df.limit(10).write.format("delta").mode("append").save(resolve_path(version_path))
-
-    version_0_df = (
-        spark.read.format("delta").option("versionAsOf", 0).load(resolve_path(version_path))
-    )
-    latest_df = spark.read.format("delta").load(resolve_path(version_path))
-
-    LOGGER.info(
-        "Số dòng version 0: %d | Số dòng version mới nhất: %d",
-        version_0_df.count(),
-        latest_df.count(),
-    )

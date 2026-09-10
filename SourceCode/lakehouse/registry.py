@@ -1,4 +1,4 @@
-"""Control plane cho lifecycle của từng pipeline run.
+"""Sổ theo dõi lifecycle của từng pipeline run.
 
 Registry là bảng trạng thái hiện tại của một run, không phải event log append-only.
 Mỗi ``run_id`` chỉ có một dòng và mọi chuyển trạng thái đều cập nhật đúng dòng đó.
@@ -119,7 +119,8 @@ class BatchRegistry:
             for field in self.REGISTRY_SCHEMA.fields
         }
         row.update(payload)
-        row["last_updated_at"] = row.get("last_updated_at") or self._now()
+        # Mỗi lần update phải có timestamp mới để truy vấn run gần nhất đúng.
+        row["last_updated_at"] = self._now()
         source_df = self.spark.createDataFrame([row], self.REGISTRY_SCHEMA)
 
         if not self._delta_exists():
@@ -278,16 +279,12 @@ class BatchRegistry:
     def mark_reconciled(self, run_id: str) -> None:
         self.update_status(run_id, "RECONCILED")
 
-    def mark_ready_to_publish(self, run_id: str) -> None:
-        """Đánh dấu Gold đã pass gate và chuẩn bị đổi publication pointer."""
-        self.update_status(run_id, "READY_TO_PUBLISH")
-
-    def mark_control_finalization_pending(self, run_id: str, error: Exception | str) -> None:
-        """Pointer đã đổi nhưng registry chưa chốt được; không báo FAILED giả."""
+    def mark_publish_metadata_pending(self, run_id: str, error: Exception | str) -> None:
+        """Snapshot đã đổi nhưng metadata chưa chốt được; không báo FAILED giả."""
         self.update_status(
             run_id,
-            "CONTROL_FINALIZATION_PENDING",
-            error_code="CONTROL_FINALIZATION_PENDING",
+            "PUBLISH_METADATA_PENDING",
+            error_code="PUBLISH_METADATA_PENDING",
             error_message=str(error)[:4000],
         )
 
@@ -323,65 +320,3 @@ class BatchRegistry:
             completed_at=self._now(),
         )
         LOGGER.error("Registry: run=%s status=FAILED code=%s", run_id, error_code)
-
-    # API tương thích ngược với pipeline/CLI hiện tại.
-    def register_batch_start(
-        self,
-        run_id: str,
-        batch_id: str,
-        source_uri: str,
-        source_hash: str,
-        row_count: int = 0,
-        source_system: str = "ecommerce_csv",
-        pipeline_version: str = "1.0.0",
-        contract_version: str = "1.0.0",
-        source_size: int = 0,
-    ) -> None:
-        self.start_run(
-            run_id=run_id,
-            batch_id=batch_id,
-            source_uri=source_uri,
-            source_hash=source_hash,
-            raw_rows=row_count,
-            source_system=source_system,
-            pipeline_version=pipeline_version,
-            contract_version=contract_version,
-            source_size_bytes=source_size,
-        )
-
-    def mark_batch_success(
-        self,
-        run_id: str,
-        batch_id: str,
-        row_count: int | None = None,
-        certified_gold_version: int | None = None,
-    ) -> None:
-        """API cũ: SUCCESS vẫn được ghi qua cùng một dòng registry."""
-        current = self.find_by_run_id(run_id)
-        if current is None:
-            raise ValueError(f"Không tìm thấy run_id={run_id} để mark success")
-        if current["batch_id"] != batch_id:
-            raise BatchConflictError(f"run_id={run_id} không thuộc batch_id={batch_id}")
-        fields: dict[str, Any] = {"completed_at": self._now()}
-        if row_count is not None:
-            fields["raw_rows"] = int(row_count)
-        if certified_gold_version is not None:
-            fields["published_version"] = str(certified_gold_version)
-        self.update_status(run_id, "SUCCESS", **fields)
-
-    def mark_batch_failed(self, run_id: str, batch_id: str, error_message: str) -> None:
-        """API cũ cho caller hiện hữu; vẫn cập nhật đúng một dòng theo ``run_id``."""
-        current = self.find_by_run_id(run_id)
-        if current is None:
-            raise ValueError(f"Không tìm thấy run_id={run_id} để mark failed")
-        if current["batch_id"] != batch_id:
-            raise BatchConflictError(f"run_id={run_id} không thuộc batch_id={batch_id}")
-        self.mark_failed(run_id, error_message)
-
-    def is_latest_run_certified(self) -> bool:
-        """Kiểm tra run mới nhất đã được công bố thành công hay chưa."""
-        dataframe = self._read()
-        if dataframe is None:
-            return False
-        latest = dataframe.orderBy(col("last_updated_at").desc()).limit(1).collect()
-        return bool(latest and latest[0]["status"] in {"SUCCESS", "PUBLISHED"})

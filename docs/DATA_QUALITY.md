@@ -62,17 +62,19 @@ Cùng order line nhưng timestamp khác nhau. Ví dụ Processing lúc 09:00 và
 lúc 10:00 đều là event hợp lệ. Event 10:00 thắng cho current-state merge, nhưng
 event 09:00 vẫn được giữ ở Bronze.
 
-## Reject-rate gate
+## Reject-rate reporting
 
-Mặc định pipeline dùng ngưỡng 5%:
+Pipeline chỉ báo cáo tỷ lệ quarantine để vận hành và không tự đặt một ngưỡng
+5% không xuất phát từ yêu cầu nghiệp vụ:
 
 ~~~text
 reject_rate = rejected_rows / raw_rows
 ~~~
 
-Nếu vượt ECOMMERCE_MAX_REJECT_RATE, pipeline đánh dấu FAILED và không đổi
-publication pointer. Ngưỡng có thể truyền qua PipelineConfig để test hoặc môi
-trường khác nhau không phải sửa business logic.
+File-level failure (schema sai, file rỗng hoặc không đọc được) vẫn làm run
+FAILED. Row-level failure được ghi vào Quarantine; các row hợp lệ tiếp tục đi
+qua Silver và Gold. Operator có thể dùng `reject_rate` trong monitoring để
+đặt cảnh báo phù hợp với từng nguồn dữ liệu.
 
 ## Reconciliation groups
 

@@ -9,10 +9,6 @@ def test_cli_accepts_all_public_commands():
         "report",
         "reconcile",
         "pipeline",
-        "delta-demo",
-        "benchmark",
-        "mongodb",
-        "thrift",
     ]:
         assert parser.parse_args([command]).command == command
 
@@ -20,12 +16,10 @@ def test_cli_accepts_all_public_commands():
 def test_cli_pipeline_subcommands_and_flags():
     parser = build_parser()
 
-    # Bootstrap default
-    args_boot = parser.parse_args(["pipeline", "--local", "--scd2", "--demo"])
+    # Bootstrap mặc định
+    args_boot = parser.parse_args(["pipeline", "--scd2"])
     assert args_boot.command == "pipeline"
-    assert args_boot.local is True
     assert args_boot.scd2 is True
-    assert args_boot.demo is True
     assert args_boot.mode == "bootstrap"
 
     # Incremental explicit
@@ -37,10 +31,3 @@ def test_cli_pipeline_subcommands_and_flags():
     assert args_inc.input == "batch.csv"
     assert args_inc.batch_id == "B001"
     assert args_inc.scd2 is True
-
-
-def test_cli_serve_subcommand():
-    parser = build_parser()
-    assert parser.parse_args(["serve", "thrift"]).target == "thrift"
-    assert parser.parse_args(["serve", "mongodb"]).target == "mongodb"
-

@@ -42,8 +42,8 @@ BUSINESS_METRICS_PATH = Path(__file__).resolve().parents[2] / "contracts" / "bus
 SHIPPING_SLA_PATH = Path(__file__).resolve().parents[2] / "contracts" / "shipping_sla.yaml"
 
 
-def _ensure_certified_measures(dataframe: Any) -> Any:
-    """Chuẩn hóa measure Gold, tuyệt đối không dùng source revenue/profit làm certified."""
+def _ensure_gold_measures(dataframe: Any) -> Any:
+    """Chuẩn hóa measure Gold, không dùng revenue/profit nguồn thay số liệu tính lại."""
     result = dataframe
     if "Net_Line_Amount" not in result.columns:
         if "Revenue" in result.columns:
@@ -88,7 +88,7 @@ def _sla_days_expression(method_column: Any) -> Any:
 
 
 @lru_cache(maxsize=1)
-def _load_business_policy() -> dict[str, list[str]]:
+def load_business_policy() -> dict[str, list[str]]:
     """Đọc status policy từ contract thay vì hard-code trong từng mart."""
     if not BUSINESS_METRICS_PATH.exists():
         raise FileNotFoundError(f"Thiếu business metric contract: {BUSINESS_METRICS_PATH}")
@@ -116,7 +116,7 @@ def _load_business_policy() -> dict[str, list[str]]:
 
 def _filter_policy_rows(clean_df: Any, metric_name: str) -> Any:
     """Lọc đúng các trạng thái được phép của một metric Gold."""
-    statuses = _load_business_policy()[metric_name]
+    statuses = load_business_policy()[metric_name]
     return clean_df.filter(col("Order_Status").isin(statuses))
 
 
@@ -127,7 +127,7 @@ def build_fact_sales(
     """Xây dựng FactSales theo đúng Grain: 1 dòng = 1 sản phẩm trong 1 đơn hàng."""
     LOGGER.info("Bắt đầu xây dựng FactSales table...")
 
-    fact = _ensure_certified_measures(clean_df).withColumn(
+    fact = _ensure_gold_measures(clean_df).withColumn(
         "DateKey", date_format(col("Order_Date"), "yyyyMMdd").cast("int")
     )
 
@@ -161,14 +161,15 @@ def build_fact_sales(
     else:
         # Standard SCD Type 1 Join (guaranteed 1 Customer_ID = 1 row in dim_customer)
         fact = fact.join(dim_cust, on=["Customer_ID"], how="left")
-    fact = fact.join(dimensions["dim_location"], on=["Region", "Country"], how="left")
-    fact = fact.join(dimensions["dim_payment"], on=["Payment_Method"], how="left")
+    fact = fact.join(dimensions["dim_geography"], on=["Region", "Country"], how="left")
     fact = fact.join(
-        dimensions["dim_shipping"], on=["Shipping_Method", "Delivery_Level"], how="left"
-    )
-    fact = fact.join(
-        dimensions["dim_order_status"],
-        on=["Order_Status", "Is_Returned", "Is_Cancelled"],
+        dimensions["dim_order_context"],
+        on=[
+            "Order_Status",
+            "Payment_Method",
+            "Shipping_Method",
+            "Delivery_Level",
+        ],
         how="left",
     )
 
@@ -194,11 +195,9 @@ def build_fact_sales(
             "DateKey",
             "Order_Status",
             "CustomerKey",
-            "LocationKey",
+            "GeographyKey",
             "ProductKey",
-            "ShippingKey",
-            "PaymentKey",
-            "StatusKey",
+            "ContextKey",
             "Unit_Price",
             "Quantity",
             "Discount",
@@ -224,7 +223,7 @@ def build_fact_order_fulfillment(
     dimensions: dict[str, Any],
 ) -> Any:
     """Xây fact order grain, không nhân bản Shipping_Cost theo số line."""
-    lines = _ensure_certified_measures(silver_order_lines_current.filter(~col("Is_Deleted")))
+    lines = _ensure_gold_measures(silver_order_lines_current.filter(~col("Is_Deleted")))
     line_metrics = lines.groupBy("Order_ID").agg(
         countDistinct("Order_Line_ID").alias("Line_Count"),
         spark_sum("Quantity").alias("Total_Quantity"),
@@ -254,16 +253,15 @@ def build_fact_order_fulfillment(
             on="Customer_ID",
             how="left",
         )
-    orders = orders.join(dimensions["dim_location"], on=["Region", "Country"], how="left")
-    orders = orders.join(dimensions["dim_payment"], on="Payment_Method", how="left")
+    orders = orders.join(dimensions["dim_geography"], on=["Region", "Country"], how="left")
     orders = orders.join(
-        dimensions["dim_shipping"],
-        on=["Shipping_Method", "Delivery_Level"],
-        how="left",
-    )
-    orders = orders.join(
-        dimensions["dim_order_status"].select("Order_Status", "StatusKey"),
-        on="Order_Status",
+        dimensions["dim_order_context"],
+        on=[
+            "Order_Status",
+            "Payment_Method",
+            "Shipping_Method",
+            "Delivery_Level",
+        ],
         how="left",
     )
     orders = add_surrogate_key(orders, "OrderKey", ["Order_ID"])
@@ -279,10 +277,8 @@ def build_fact_order_fulfillment(
         "Shipping_Method",
         "DateKey",
         "CustomerKey",
-        "LocationKey",
-        "PaymentKey",
-        "ShippingKey",
-        "StatusKey",
+        "GeographyKey",
+        "ContextKey",
         "Line_Count",
         "Total_Quantity",
         "Order_Value",
@@ -300,36 +296,9 @@ def build_fact_order_fulfillment(
     )
 
 
-def aggregate_sales(
-    dataframe: Any,
-    dimensions: list[str],
-    *,
-    include_quantity: bool = False,
-    include_average_order_value: bool = False,
-) -> Any:
-    """Tạo các measure bán hàng dùng chung cho các Gold Data Mart."""
-    dataframe = _ensure_certified_measures(dataframe)
-    metrics = [countDistinct("Order_ID").alias("Total_Orders")]
-    if include_quantity:
-        metrics.append(spark_sum("Quantity").alias("Total_Quantity"))
-    metrics.extend(
-        [
-            round(spark_sum("Net_Line_Amount"), 2).alias("Total_Revenue"),
-            round(spark_sum("Gross_Profit"), 2).alias("Total_Profit"),
-        ]
-    )
-    if include_average_order_value:
-        metrics.append(
-            round(spark_sum("Net_Line_Amount") / countDistinct("Order_ID"), 2).alias(
-                "Average_Order_Value"
-            )
-        )
-    return dataframe.groupBy(*dimensions).agg(*metrics)
-
-
 def build_rfm_mart(clean_df: Any, analysis_date: str | None = None) -> Any:
     """Xây dựng RFM từ các đơn Delivered theo business policy v1."""
-    delivered_df = _filter_policy_rows(_ensure_certified_measures(clean_df), "rfm")
+    delivered_df = _filter_policy_rows(_ensure_gold_measures(clean_df), "rfm")
     if delivered_df.limit(1).count() == 0:
         return clean_df.sparkSession.createDataFrame(
             [],
@@ -369,7 +338,7 @@ def build_rfm_mart(clean_df: Any, analysis_date: str | None = None) -> Any:
 
 def build_abc_mart(clean_df: Any) -> Any:
     """Xây dựng Pareto ABC từ Delivered Revenue theo business policy v1."""
-    delivered_df = _filter_policy_rows(_ensure_certified_measures(clean_df), "abc")
+    delivered_df = _filter_policy_rows(_ensure_gold_measures(clean_df), "abc")
     total_rev = delivered_df.select(spark_sum("Net_Line_Amount")).collect()[0][0]
     if not total_rev or total_rev <= 0:
         return clean_df.sparkSession.createDataFrame(
@@ -414,7 +383,7 @@ def build_abc_mart(clean_df: Any) -> Any:
 
 def build_mart_order_summary(clean_df: Any) -> Any:
     """Xây dựng Data Mart tổng hợp ở mức Đơn Hàng (Order Grain), phân tách rành mạch với FactSales (Line-Item Grain)."""
-    clean_df = _ensure_certified_measures(clean_df)
+    clean_df = _ensure_gold_measures(clean_df)
     return (
         clean_df.groupBy("Order_ID", "Order_Date", "Customer_ID", "Order_Status")
         .agg(
@@ -428,15 +397,15 @@ def build_mart_order_summary(clean_df: Any) -> Any:
     )
 
 
-def build_certified_marts(
+def build_gold_marts(
     sales_enriched: Any,
     fact_order_fulfillment: Any,
     publication_as_of_date: str | None = None,
 ) -> dict[str, Any]:
-    """Tạo sáu mart nghiệp vụ dùng cùng certified line/order facts."""
-    sales = _ensure_certified_measures(sales_enriched)
+    """Tạo sáu mart nghiệp vụ từ cùng line/order facts đã chuẩn hóa."""
+    sales = _ensure_gold_measures(sales_enriched)
     orders = fact_order_fulfillment
-    policy = _load_business_policy()
+    policy = load_business_policy()
     delivered = col("Order_Status").isin(policy["recognized_revenue"])
     returned = col("Order_Status").isin(policy["return_numerator"])
     cancelled = col("Order_Status").isin(policy["cancelled_value"])
@@ -572,26 +541,18 @@ def build_sales_enriched(fact_sales: Any, dimensions: dict[str, Any]) -> Any:
         ]
         enriched = enriched.join(dim_customer.select(*cust_cols), on="CustomerKey", how="left")
 
-    dim_location = dimensions.get("dim_location")
-    if dim_location is not None and "LocationKey" in enriched.columns:
-        enriched = enriched.join(dim_location, on="LocationKey", how="left")
+    dim_geography = dimensions.get("dim_geography")
+    if dim_geography is not None and "GeographyKey" in enriched.columns:
+        enriched = enriched.join(dim_geography, on="GeographyKey", how="left")
 
-    dim_payment = dimensions.get("dim_payment")
-    if dim_payment is not None and "PaymentKey" in enriched.columns:
-        enriched = enriched.join(dim_payment, on="PaymentKey", how="left")
-
-    dim_shipping = dimensions.get("dim_shipping")
-    if dim_shipping is not None and "ShippingKey" in enriched.columns:
-        enriched = enriched.join(dim_shipping, on="ShippingKey", how="left")
-
-    dim_status = dimensions.get("dim_order_status")
-    if dim_status is not None and "StatusKey" in enriched.columns:
-        status_columns = [
+    dim_context = dimensions.get("dim_order_context")
+    if dim_context is not None and "ContextKey" in enriched.columns:
+        context_columns = [
             column
-            for column in dim_status.columns
-            if column == "StatusKey" or column not in enriched.columns
+            for column in dim_context.columns
+            if column == "ContextKey" or column not in enriched.columns
         ]
-        enriched = enriched.join(dim_status.select(*status_columns), on="StatusKey", how="left")
+        enriched = enriched.join(dim_context.select(*context_columns), on="ContextKey", how="left")
 
     dim_date = dimensions.get("dim_date")
     if dim_date is not None and "DateKey" in enriched.columns:
@@ -619,15 +580,15 @@ def build_sales_enriched(fact_sales: Any, dimensions: dict[str, Any]) -> Any:
 
 
 def build_all_marts(clean_df: Any) -> dict[str, Any]:
-    """Tạo các mart tương thích cho test và consumer cũ.
+    """Tạo bộ mart nhỏ cho các kiểm thử semantic tương thích.
 
-    Luồng production dùng ``build_certified_marts`` để tạo sáu mart có policy
-    nghiệp vụ và publication version rõ ràng. Hàm này vẫn được giữ để không
-    phá API cũ trong giai đoạn chuyển tiếp.
+    Production luôn gọi ``build_gold_marts``. Hàm này chỉ giữ overview, order
+    summary và RFM để các kiểm thử API cũ không kéo theo một danh sách mart
+    trùng lặp với Gold production.
     """
-    LOGGER.info("Bắt đầu xây dựng Gold Data Marts...")
+    LOGGER.info("Bắt đầu xây dựng semantic smoke marts...")
 
-    clean_df = _ensure_certified_measures(clean_df)
+    clean_df = _ensure_gold_measures(clean_df)
     overview = clean_df.agg(
         countDistinct("Order_ID").alias("Total_Orders"),
         spark_sum("Quantity").alias("Total_Quantity"),
@@ -641,53 +602,8 @@ def build_all_marts(clean_df: Any) -> dict[str, Any]:
         round(avg("Shipping_Cost"), 2).alias("Average_Shipping_Cost"),
     )
 
-    marts = {
+    return {
         "mart_overview": overview,
         "mart_order_summary": build_mart_order_summary(clean_df),
-        "mart_revenue_by_region": aggregate_sales(clean_df, ["Region"]).orderBy(
-            col("Total_Revenue").desc()
-        ),
-        "mart_revenue_by_country": aggregate_sales(clean_df, ["Region", "Country"]).orderBy(
-            col("Total_Revenue").desc()
-        ),
-        "mart_revenue_by_category": aggregate_sales(
-            clean_df, ["Category", "Sub_Category"], include_quantity=True
-        ).orderBy(col("Total_Revenue").desc()),
-        "mart_top_products_by_revenue": (
-            clean_df.groupBy("Product_Name", "Category", "Sub_Category")
-            .agg(
-                spark_sum("Quantity").alias("Total_Quantity"),
-                round(spark_sum("Net_Line_Amount"), 2).alias("Total_Revenue"),
-                round(spark_sum("Gross_Profit"), 2).alias("Total_Profit"),
-            )
-            .orderBy(col("Total_Revenue").desc())
-            .limit(10)
-        ),
-        "mart_payment_analysis": aggregate_sales(clean_df, ["Payment_Method"]).orderBy(
-            col("Total_Revenue").desc()
-        ),
-        "mart_shipping_analysis": (
-            clean_df.groupBy("Shipping_Method", "Delivery_Level")
-            .agg(
-                countDistinct("Order_ID").alias("Total_Orders"),
-                round(avg("Shipping_Days"), 2).alias("Avg_Shipping_Days"),
-                round(avg("Shipping_Cost"), 2).alias("Avg_Shipping_Cost"),
-                round(spark_sum("Net_Line_Amount"), 2).alias("Total_Revenue"),
-            )
-            .orderBy(col("Total_Orders").desc())
-        ),
-        "mart_order_status_analysis": aggregate_sales(clean_df, ["Order_Status"]).orderBy(
-            col("Total_Orders").desc()
-        ),
-        "mart_monthly_revenue": aggregate_sales(clean_df, ["Year", "Month"]).orderBy(
-            "Year", "Month"
-        ),
-        "mart_customer_segment_analysis": aggregate_sales(
-            clean_df, ["Customer_Segment"], include_average_order_value=True
-        ).orderBy(col("Total_Revenue").desc()),
         "mart_rfm_customer_segmentation": build_rfm_mart(clean_df),
-        "mart_abc_product_analysis": build_abc_mart(clean_df),
     }
-
-    LOGGER.info("Đã tạo hoàn tất Gold Data Marts.")
-    return marts

@@ -1,7 +1,6 @@
-"""Module tính toán các chỉ số KPI, RFM Customer Segmentation và Pareto ABC Product Analysis.
+"""Tính KPI, RFM và ABC độc lập với Spark.
 
-Module này sử dụng Pandas để tính toán độc lập với Spark, cho phép chạy nhanh
-trong môi trường CI/CD, kiểm thử unit test hoặc báo cáo nhanh không cần cụm Hadoop.
+Module này dùng Pandas cho unit test và kiểm tra chéo kết quả Gold.
 """
 
 from __future__ import annotations
@@ -17,7 +16,7 @@ if TYPE_CHECKING:
 
 @dataclass(frozen=True)
 class OverviewMetrics:
-    """Nhóm chỉ số KPI tổng quan điều hành toàn bộ nền tảng Ecommerce.
+    """Nhóm KPI tổng quan của dữ liệu bán hàng.
 
     Attributes:
         rows: Tổng số dòng bản ghi giao dịch trong tập dữ liệu.
@@ -72,7 +71,7 @@ def _normalise_reporting_measures(dataframe: pd.DataFrame) -> pd.DataFrame:
         result["Shipping_Cost"] = result["Order_Shipping_Cost"]
     required = {"Revenue", "Profit"}.difference(result.columns)
     if required:
-        raise ValueError(f"Thiếu certified measures cho báo cáo: {sorted(required)}")
+        raise ValueError(f"Thiếu Gold measures cho báo cáo: {sorted(required)}")
     return result
 
 

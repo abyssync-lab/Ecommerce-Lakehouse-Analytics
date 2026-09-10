@@ -1,10 +1,11 @@
-"""Certified Gold publication và stable serving views.
+"""Ghi Gold snapshot và tạo view ổn định cho Power BI.
 
 Delta chỉ atomic trong phạm vi từng table. Module này dùng hai lớp bảo vệ:
 
 * Mỗi run được ghi riêng dưới ``gold/_runs/<run_id>`` để reconciliation đọc một snapshot.
 * Serving giữ snapshot theo ``Publication_Run_ID``; view chỉ trả run đang nằm trong
-  control pointer. Run lỗi có thể để lại dữ liệu staging nhưng không đổi pointer.
+  snapshot hiện hành. Run lỗi có thể để lại dữ liệu staging nhưng không đổi
+  snapshot đang được sử dụng.
 """
 
 from __future__ import annotations
@@ -109,7 +110,7 @@ def publish_gold_run(spark: Any, tables: dict[str, Any], run_id: str) -> None:
     # vẫn là run cũ và Power BI tiếp tục đọc snapshot cũ.
     _create_serving_views(spark, list(tables))
     _upsert_publication_pointer(spark, run_id)
-    LOGGER.info("Certified Gold publication thành công: current_run_id=%s", run_id)
+    LOGGER.info("Gold snapshot đã publish: current_run_id=%s", run_id)
 
 
 def _create_serving_views(spark: Any, table_names: list[str]) -> None:

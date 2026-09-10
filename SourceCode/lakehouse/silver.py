@@ -28,60 +28,14 @@ from pyspark.sql.functions import (
 from pyspark.sql.functions import round as spark_round
 from pyspark.sql.window import Window
 
-from .contracts.loader import get_spark_silver_rules, load_contract
+from .contracts.loader import (
+    DatasetContract,
+    get_spark_silver_rules,
+    load_contract,
+    load_contract_for_columns,
+)
 
 LOGGER = logging.getLogger(__name__)
-
-
-def record_pipeline_quality(
-    spark: Any,
-    raw_count: int,
-    clean_count: int,
-    rejected_count: int,
-    duplicate_count: int = 0,
-    run_id: str | None = None,
-    batch_id: str | None = None,
-) -> None:
-    """Ghi nhận số liệu giám sát Data Observability vào bảng Delta `pipeline_quality`."""
-    try:
-        from config import SETTINGS
-
-        target_path = SETTINGS.get_storage_path(
-            f"{SETTINGS.gold_monitoring_base}/pipeline_quality_delta"
-        )
-        reject_rate = (rejected_count / raw_count * 100) if raw_count > 0 else 0.0
-        row_data = [
-            (
-                run_id or "run_default",
-                batch_id or "batch_default",
-                int(raw_count),
-                int(duplicate_count),
-                int(clean_count),
-                int(rejected_count),
-                float(round(reject_rate, 2)),
-                "SUCCESS" if rejected_count == 0 else "QUARANTINE_PRESENT",
-            )
-        ]
-        schema = [
-            "run_id",
-            "batch_id",
-            "raw_rows",
-            "duplicate_rows",
-            "valid_rows",
-            "rejected_rows",
-            "reject_rate_percent",
-            "status",
-        ]
-        quality_df = spark.createDataFrame(row_data, schema).withColumn(
-            "recorded_at", current_timestamp()
-        )
-        quality_df.write.format("delta").mode("append").save(target_path)
-        LOGGER.info("Đã lưu trữ Data Quality Metrics vào %s", target_path)
-    except Exception:
-        # Quality metrics thuộc control/observability plane. Nếu ghi thất bại mà vẫn
-        # cho pipeline PASS thì operator không thể biết accounting của batch bị mất.
-        LOGGER.exception("Không thể ghi pipeline_quality Delta table")
-        raise
 
 
 def validate_silver_data(
@@ -89,14 +43,17 @@ def validate_silver_data(
     raw_count: int,
     duplicate_count: int = 0,
     rejected_count: int = 0,
+    contract: DatasetContract | None = None,
+    source_columns: set[str] | None = None,
 ) -> None:
     """Kiểm tra các quy tắc nghiệp vụ cốt lõi Data Contract sau bước làm sạch."""
-    contract = load_contract()
-    contract_rules = get_spark_silver_rules(contract)
+    active_contract = contract or load_contract()
+    contract_rules = get_spark_silver_rules(active_contract)
+    source_column_set = source_columns or set(clean_df.columns)
     rules = {
         rule_name: cond
         for rule_name, cond in contract_rules.items()
-        if any(c in clean_df.columns for c in [rule_name.split()[0]])
+        if rule_name.split()[0] in source_column_set
     }
     # Đảm bảo các quy tắc cốt lõi luôn có mặt
     rules.setdefault("Order_ID không rỗng", col("Order_ID").isNotNull())
@@ -104,7 +61,10 @@ def validate_silver_data(
     rules.setdefault("Unit_Price >= 0", col("Unit_Price") >= 0)
     rules.setdefault("Discount trong [0, 1]", col("Discount").between(0, 1))
     if "Source_Revenue" in clean_df.columns:
-        rules.setdefault("Source_Revenue >= 0", col("Source_Revenue") >= 0)
+        rules.setdefault(
+            "Source_Revenue >= 0",
+            col("Source_Revenue").isNull() | (col("Source_Revenue") >= 0),
+        )
     # Shipping_Days là thuộc tính cấp đơn và có thể chưa xuất hiện ở event
     # tạo mới; NULL không phải là 0 và không được biến thành dữ liệu giả.
     rules.setdefault(
@@ -130,7 +90,7 @@ def validate_silver_data(
     reject_rate = (rejected_count / raw_count * 100) if raw_count > 0 else 0.0
 
     LOGGER.info(
-        "Thống kê Silver Quality Gate: raw=%d, duplicate=%d, valid/clean=%d, rejected/quarantine=%d (tỷ lệ reject=%.2f%%)",
+        "Thống kê Silver validation: raw=%d, duplicate=%d, valid/clean=%d, rejected/quarantine=%d (tỷ lệ reject=%.2f%%)",
         raw_count,
         duplicate_count,
         clean_count,
@@ -153,7 +113,6 @@ def clean_and_enrich_silver(
     run_id: str | None = None,
     batch_id: str | None = None,
     allow_line_id_fallback: bool = True,
-    record_quality_metrics: bool = True,
 ) -> Any:
     """Làm sạch, ép kiểu và tính toán các chỉ số bổ sung cho tầng Silver.
 
@@ -164,11 +123,9 @@ def clean_and_enrich_silver(
         batch_id: Mã định danh batch nạp.
         allow_line_id_fallback: Chỉ bật cho historical bootstrap; incremental phải nhận
             Order_Line_ID thật từ upstream.
-        record_quality_metrics: Ghi metrics observability cho lần làm sạch này. Tắt khi
-            chỉ rebuild lịch sử customer nội bộ từ Bronze.
 
     Returns:
-        Spark DataFrame sạch đã vượt qua Data Quality Gate.
+        Spark DataFrame sạch sau khi vượt qua row validation.
     """
     raw_count = raw_df.count()
     LOGGER.info("Bắt đầu quy trình làm sạch dữ liệu tầng Silver...")
@@ -447,7 +404,7 @@ def clean_and_enrich_silver(
         )
 
         LOGGER.warning(
-            "Phát hiện %d bản ghi vi phạm Data Quality Gate. Chuyển vào Quarantine.", rejected_count
+            "Phát hiện %d bản ghi vi phạm row validation. Chuyển vào Quarantine.", rejected_count
         )
         if quarantine_path:
             try:
@@ -464,7 +421,7 @@ def clean_and_enrich_silver(
                 raise
 
     # Silver line không tạo chỉ số cấp đơn lặp lại trên từng dòng. Các cột
-    # Source_* chỉ phục vụ audit; số liệu certified phải tính lại từ nguyên liệu.
+    # Source_* chỉ phục vụ audit; số liệu Gold phải tính lại từ nguyên liệu.
     clean_df = (
         clean_df.withColumnRenamed("Revenue", "Source_Revenue")
         .withColumnRenamed("Profit", "Source_Profit")
@@ -483,7 +440,8 @@ def clean_and_enrich_silver(
     # - Nếu upstream cung cấp Order_Line_ID (và không rỗng), bảo toàn nguyên bản.
     # - Nếu chưa có (dataset demo), sinh deterministic content fingerprint (Order_ID + Product_Name + Unit_Price + Quantity + Discount)
     #   thay vì row_number() động, ngăn ngừa hoàn toàn nguy cơ đè nhầm bản ghi giữa các micro-batch MERGE.
-    contract = load_contract()
+    source_contract = load_contract_for_columns(raw_df.columns)
+    contract = source_contract
     fp_cols = [
         col(c).cast("string")
         for c in contract.fallback_line_fingerprint_cols
@@ -536,19 +494,9 @@ def clean_and_enrich_silver(
         raw_count=raw_count,
         duplicate_count=duplicate_count,
         rejected_count=rejected_count,
+        contract=source_contract,
+        source_columns=set(raw_df.columns),
     )
-
-    # Ghi nhận chỉ số Data Quality Metrics
-    if record_quality_metrics:
-        record_pipeline_quality(
-            clean_df.sparkSession,
-            raw_count=raw_count,
-            clean_count=clean_count,
-            rejected_count=rejected_count,
-            duplicate_count=duplicate_count,
-            run_id=run_id,
-            batch_id=batch_id,
-        )
 
     LOGGER.info("Hoàn tất xử lý Silver Layer với %d dòng bản ghi sạch.", clean_count)
     return clean_df
@@ -646,7 +594,7 @@ def build_silver_orders_current(events_df: Any) -> Any:
 
     # Event v2 hiện tại là line feed: DELETE một line không xóa order nếu vẫn còn
     # line active. Khi OMS có order feed riêng, Order_Operation có quyền quyết định
-    # soft delete ở header; dữ liệu legacy không có line id được coi là active.
+    # soft delete ở header; dữ liệu seed không có line id được coi là active.
     if "Order_Operation" in latest.columns:
         latest = latest.withColumn(
             "Is_Deleted",

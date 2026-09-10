@@ -1,10 +1,10 @@
-"""Bộ kiểm thử các bất biến kiến trúc cấp doanh nghiệp (Enterprise Architecture Invariants).
+"""Bộ kiểm thử các bất biến của order lakehouse.
 
 Kiểm chứng các thuộc tính cốt lõi của Data Lakehouse:
 1. Idempotency: Cùng một source hash không bao giờ bị append trùng vào Bronze
 2. Stable Grain: Các micro-batch của cùng một Order không ghi đè chéo dòng sản phẩm
 3. Executable Contract: contracts/ecommerce_order.yaml là nguồn chân lý thực thi duy nhất
-4. Reconciliation Gate: Pipeline dừng ngay và báo lỗi khi có bất kỳ kiểm toán bất biến nào bị vi phạm
+4. Gold reconciliation: Pipeline dừng ngay khi bất biến dữ liệu bị vi phạm
 5. Canonical Lineage: FactSales và Gold Marts bảo toàn 100% doanh thu và tính toán
 """
 
@@ -99,14 +99,18 @@ def test_same_source_hash_idempotency_detection(spark_session, tmp_path):
     assert not registry.is_batch_processed(sample_hash)
 
     # Đăng ký và hoàn thành thành công
-    registry.register_batch_start(
+    registry.start_run(
         run_id="run_001",
         batch_id="batch_001",
         source_uri="test.csv",
         source_hash=sample_hash,
-        row_count=100,
+        raw_rows=100,
     )
-    registry.mark_batch_success(run_id="run_001", batch_id="batch_001", row_count=100)
+    registry.mark_published(
+        run_id="run_001",
+        gold_run_id="run_001",
+        published_version="1",
+    )
 
     # Khi đã hoàn thành thành công
     assert registry.is_batch_processed(sample_hash)
@@ -122,7 +126,7 @@ def test_registry_uses_one_schema_and_rejects_batch_id_conflict(spark_session, t
         source_hash="hash_a",
     )
     registry.update_metrics("run_lifecycle", raw_rows=10, valid_event_rows=10)
-    registry.mark_failed("run_lifecycle", "quality gate failed", error_code="DQ_FAILED")
+    registry.mark_failed("run_lifecycle", "row validation failed", error_code="DQ_FAILED")
 
     failed = registry.find_by_run_id("run_lifecycle")
     assert failed["status"] == "FAILED"
@@ -140,7 +144,7 @@ def test_registry_uses_one_schema_and_rejects_batch_id_conflict(spark_session, t
 
 
 def test_reconciliation_fails_when_revenue_discrepant(spark_session):
-    """Kiểm tra Reconciliation Gate phát hiện và trả về FAIL khi số liệu doanh thu bị lệch."""
+    """Kiểm tra Gold reconciliation phát hiện FAIL khi số liệu doanh thu bị lệch."""
     cols = [
         "Order_ID", "Order_Date", "Year", "Month", "Customer_ID", "Customer_Gender", "Customer_Segment",
         "Product_Name", "Category", "Sub_Category", "Quantity", "Unit_Price", "Discount",
@@ -229,7 +233,7 @@ def test_calculate_source_hash_idempotency(tmp_path):
 
 
 def test_pipeline_run_result_dataclass_contract():
-    """Kiểm tra PipelineRunResult khởi tạo đúng các trường theo chuẩn kiểm toán Enterprise."""
+    """Kiểm tra PipelineRunResult khởi tạo đúng các trường của một run."""
     try:
         from lakehouse.pipeline import PipelineRunResult
     except ImportError:

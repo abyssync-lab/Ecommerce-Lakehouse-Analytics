@@ -1,4 +1,4 @@
-"""Sinh báo cáo Business Insights dạng Markdown tự động từ dataset giao dịch."""
+"""Sinh báo cáo Business Insights từ Gold snapshot hoặc dữ liệu validation."""
 
 from __future__ import annotations
 
@@ -7,13 +7,13 @@ import sys
 from pathlib import Path
 
 import pandas as pd
-from data_quality import assert_quality, validate_business_values
-from portfolio_metrics import (
+from business_metrics import (
     aggregate_performance,
     calculate_abc_product_analysis,
     calculate_overview,
     calculate_rfm_segmentation,
 )
+from data_quality import assert_quality, validate_business_values
 
 
 def money(value: float) -> str:
@@ -42,14 +42,14 @@ def dataframe_to_markdown(dataframe: pd.DataFrame) -> str:
     return "\n".join([header_line, separator, *body])
 
 
-def build_report(dataframe: pd.DataFrame, source_label: str = "certified Gold serving") -> str:
-    """Tạo nội dung Markdown báo cáo Business Insights chỉ từ dữ liệu đã qua Data Quality Gate.
+def build_report(dataframe: pd.DataFrame, source_label: str = "published Gold serving") -> str:
+    """Tạo nội dung Markdown báo cáo Business Insights từ Gold đã publish.
 
     Args:
         dataframe: Tập dữ liệu giao dịch bán hàng.
 
     Returns:
-        Nội dung Markdown đầy đủ của file BUSINESS_INSIGHTS.md.
+        Nội dung Markdown của file BUSINESS_INSIGHTS.md.
     """
     assert_quality(validate_business_values(dataframe))
     metrics = calculate_overview(dataframe)
@@ -81,9 +81,9 @@ def build_report(dataframe: pd.DataFrame, source_label: str = "certified Gold se
     )
 
     lines = [
-        "# GlobalCart Intelligence — Báo Cáo Phân Tích Dữ Liệu Kinh Doanh",
+        "# GlobalCart Order Lakehouse — Báo Cáo Kinh Doanh",
         "",
-        f"> 🤖 Báo cáo này được sinh tự động từ `{source_label}` thông qua Data Quality Gate & Analytics Engine.",
+        f"> Báo cáo này được sinh tự động từ `{source_label}` sau khi Gold reconciliation hoàn tất.",
         "",
         "## 1. Chỉ Số KPI Tổng Quan (Executive Overview)",
         "",
@@ -102,10 +102,10 @@ def build_report(dataframe: pd.DataFrame, source_label: str = "certified Gold se
         "",
         "## 2. Phát Hiện Phân Tích Nổi Bật (Key Business Insights)",
         "",
-        f"- 🌍 **Middle East dẫn đầu doanh thu** với **{money(float(regions.iloc[0]['Revenue']))}**, tuy nhiên phân bổ thị trường giữa 4 khu vực tương đối đồng đều (chênh lệch dưới 5%).",
-        f"- 💻 **Electronics là ngành hàng chủ lực**, chiếm **{categories.iloc[0]['Revenue'] / metrics.revenue * 100:.1f}% tổng doanh thu** ({money(float(categories.iloc[0]['Revenue']))}).",
-        f"- 🏆 **{products.iloc[0]['Product_Name']}** đạt doanh số cao nhất toàn hệ thống với **{money(float(products.iloc[0]['Revenue']))}**.",
-        f"- ⚠️ **Tổng tỷ lệ Đơn không thành công (Returned + Cancelled)** ở mức **{metrics.return_rate_percent + metrics.cancellation_rate_percent:.2f}%**, cần tối ưu lại đối tác vận chuyển.",
+        f"- 🌍 **{regions.iloc[0]['Region']}** là khu vực có doanh thu cao nhất trong dữ liệu với **{money(float(regions.iloc[0]['Revenue']))}**.",
+        f"- 🏷️ **{categories.iloc[0]['Category']}** là nhóm ngành có doanh thu cao nhất, chiếm **{categories.iloc[0]['Revenue'] / metrics.revenue * 100:.1f}%** tổng doanh thu.",
+        f"- 🏆 **{products.iloc[0]['Product_Name']}** là sản phẩm có doanh thu cao nhất với **{money(float(products.iloc[0]['Revenue']))}**.",
+        f"- ⚠️ Tỷ lệ đơn Returned hoặc Cancelled là **{metrics.return_rate_percent + metrics.cancellation_rate_percent:.2f}%** theo trạng thái current-state.",
         "",
         "## 3. Phân Hạng Khách Hàng (RFM Customer Segmentation)",
         "",
@@ -130,14 +130,14 @@ def build_report(dataframe: pd.DataFrame, source_label: str = "certified Gold se
         "## 🛠️ Hướng Dẫn Tái Tạo Báo Cáo Này",
         "",
         "```powershell",
-        "python SourceCode\\generate_portfolio_report.py",
+        "python SourceCode\\build_business_report.py",
         "```",
     ]
     return "\n".join(lines) + "\n"
 
 
 def main() -> None:
-    """Đọc certified Gold mặc định; CSV chỉ là fallback được yêu cầu rõ ràng."""
+    """Đọc published Gold mặc định; CSV chỉ dùng cho validation độc lập."""
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8")
 
@@ -146,7 +146,7 @@ def main() -> None:
         "--source",
         choices=["published", "csv"],
         default="published",
-        help="Nguồn báo cáo: certified Gold serving (mặc định) hoặc CSV validation độc lập",
+        help="Nguồn báo cáo: published Gold serving (mặc định) hoặc CSV validation độc lập",
     )
     parser.add_argument("--input", type=Path, default=Path("Data/EcommerceSalesDataset.csv"))
     parser.add_argument("--output", type=Path, default=Path("docs/BUSINESS_INSIGHTS.md"))
@@ -163,7 +163,7 @@ def main() -> None:
             current_run_id = get_current_publication(spark)
             if not current_run_id or current_run_id == "__NONE__":
                 raise RuntimeError(
-                    "Chưa có certified Gold publication. Hãy chạy pipeline thành công trước "
+                    "Chưa có published Gold snapshot. Hãy chạy pipeline thành công trước "
                     "hoặc dùng --source csv cho validation độc lập."
                 )
 

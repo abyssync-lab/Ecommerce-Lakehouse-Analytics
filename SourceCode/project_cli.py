@@ -1,4 +1,4 @@
-"""Entry Point CLI điều phối thống nhất toàn bộ hệ thống GlobalCart Intelligence."""
+"""CLI đơn giản cho pipeline order lakehouse của GlobalCart."""
 
 from __future__ import annotations
 
@@ -54,9 +54,9 @@ def run_quality_checks() -> int:
         LOGGER.error("Kiểm tra validate_input thất bại với exit code %d", validate_code)
         return validate_code
 
-    # Certified report chỉ có thể sinh sau khi bootstrap đã tạo và publish Gold.
+    # Báo cáo chỉ có thể sinh sau khi bootstrap đã tạo và publish Gold.
     # Không đọc report cũ hoặc CSV raw để che khuất lỗi của pipeline chính.
-    LOGGER.info("Chạy bootstrap pipeline để tạo certified Gold...")
+    LOGGER.info("Chạy bootstrap pipeline để tạo published Gold...")
     pipeline_code = run_python(
         "SparkEcommerceAnalysis.py",
         ["--input", str(DEFAULT_DATASET)],
@@ -65,8 +65,8 @@ def run_quality_checks() -> int:
         LOGGER.error("Bootstrap pipeline thất bại với exit code %d", pipeline_code)
         return pipeline_code
 
-    LOGGER.info("Sinh lại báo cáo Business Insights tự động...")
-    report_code = run_python("generate_portfolio_report.py")
+    LOGGER.info("Sinh lại báo cáo Business Insights từ Gold...")
+    report_code = run_python("build_business_report.py")
     if report_code != 0:
         LOGGER.error("Tạo báo cáo report thất bại với exit code %d", report_code)
         return report_code
@@ -81,7 +81,7 @@ def run_quality_checks() -> int:
 
 def run_reconciliation() -> int:
     """Khởi chạy bộ kiểm toán đối soát bất biến doanh thu, số dòng và SCD2."""
-    LOGGER.info("Khởi chạy kiểm toán Data Reconciliation Gate...")
+    LOGGER.info("Khởi chạy kiểm tra Gold reconciliation...")
     return subprocess.run(
         [sys.executable, "-m", "pytest", "tests/test_reconciliation.py", "-v"],
         cwd=PROJECT_ROOT,
@@ -97,22 +97,18 @@ def build_parser() -> argparse.ArgumentParser:
     """
     parser = argparse.ArgumentParser(
         prog="globalcart",
-        description="🌐 GlobalCart Intelligence CLI — Hệ thống quản lý Lakehouse & BI Platform",
+        description="GlobalCart Order Lakehouse CLI — chạy, kiểm tra và đọc Gold snapshot",
     )
     commands = parser.add_subparsers(dest="command", required=True)
 
-    commands.add_parser(
-        "doctor", help="🏥 Chẩn đoán môi trường Python, Java, Hadoop HDFS và thư viện"
-    )
+    commands.add_parser("doctor", help="🏥 Chẩn đoán môi trường Python, Java và Spark")
     commands.add_parser(
         "check", help="🧪 Kiểm tra chất lượng dữ liệu đầu vào, sinh báo cáo & chạy Pytest"
     )
-    commands.add_parser(
-        "report", help="📊 Sinh lại báo cáo Business Insights tự động (docs/BUSINESS_INSIGHTS.md)"
-    )
+    commands.add_parser("report", help="📊 Sinh báo cáo business từ published Gold snapshot")
 
     reconcile_parser = commands.add_parser(
-        "reconcile", help="⚖️ Chạy kiểm toán đối soát bất biến doanh thu, grain và SCD2"
+        "reconcile", help="⚖️ Chạy kiểm tra đối soát doanh thu, grain và SCD2"
     )
     reconcile_parser.add_argument(
         "--run-id", type=str, default=None, help="Mã nhận diện phiên kiểm toán"
@@ -141,47 +137,14 @@ def build_parser() -> argparse.ArgumentParser:
         help="Mã nhận diện batch nạp",
     )
     pipeline_parser.add_argument(
-        "--local",
-        action="store_true",
-        help="Chạy chế độ Spark Local Storage (không cần HDFS cluster)",
-    )
-    pipeline_parser.add_argument(
         "--scd2",
         action="store_true",
         help="Kích hoạt mô hình hóa SCD Type 2 cho bảng Dimension Customer",
     )
     pipeline_parser.add_argument(
-        "--demo",
-        action="store_true",
-        help="Chạy kèm các bài demo Delta Lake (Time Travel, Schema Enforcement an toàn)",
-    )
-    pipeline_parser.add_argument(
         "--incremental",
         action="store_true",
         help="Cờ tương đương chế độ 'incremental'",
-    )
-
-    serve_parser = commands.add_parser(
-        "serve", help="🚀 Khởi động dịch vụ phục vụ dữ liệu (thrift hoặc mongodb)"
-    )
-    serve_parser.add_argument(
-        "target",
-        choices=["thrift", "mongodb"],
-        help="Dịch vụ cần khởi chạy: thrift (Power BI) hoặc mongodb (Serving Collections)",
-    )
-
-    commands.add_parser(
-        "delta-demo",
-        help="🧪 Khởi chạy các kịch bản thử nghiệm Delta Lake (Time Travel, Schema Enforcement cô lập)",
-    )
-    commands.add_parser(
-        "benchmark", help="📈 Khởi chạy Synthetic Scalability Benchmark (10K, 100K, 1M rows)"
-    )
-    commands.add_parser(
-        "mongodb", help="🍃 Đồng bộ các bảng Gold Analytics / Serving sang MongoDB Collections"
-    )
-    commands.add_parser(
-        "thrift", help="🔌 Khởi động Spark Thrift Server kết nối Power BI qua ODBC/JDBC"
     )
 
     return parser
@@ -211,24 +174,6 @@ def main(arguments: list[str] | None = None) -> int:
     if args.command == "reconcile":
         return run_reconciliation()
 
-    if args.command == "benchmark":
-        LOGGER.info("Khởi chạy Synthetic Scalability Benchmark...")
-        benchmark_script = PROJECT_ROOT / "scripts" / "benchmark_scalability.py"
-        return subprocess.run(
-            [sys.executable, str(benchmark_script)], cwd=PROJECT_ROOT, check=False
-        ).returncode
-
-    if args.command == "delta-demo":
-        LOGGER.info("Khởi chạy kịch bản thử nghiệm Delta Lake...")
-        return run_python("SparkEcommerceAnalysis.py", arguments=["--demo"])
-
-    if args.command == "serve":
-        script_by_serve = {
-            "thrift": "start_thrift_server.py",
-            "mongodb": "InsertMongoDB.py",
-        }
-        return run_python(script_by_serve[args.target])
-
     if args.command == "pipeline":
         env_vars = {}
         script_args = []
@@ -237,13 +182,9 @@ def main(arguments: list[str] | None = None) -> int:
             or getattr(args, "mode", "bootstrap") == "incremental"
         )
 
-        if getattr(args, "local", False):
-            env_vars["ECOMMERCE_USE_LOCAL_STORAGE"] = "true"
         if getattr(args, "scd2", False):
             env_vars["ECOMMERCE_USE_SCD2"] = "true"
             script_args.append("--scd2")
-        if getattr(args, "demo", False):
-            script_args.append("--demo")
         if getattr(args, "input", None):
             script_args.extend(["--input", str(args.input)])
         if getattr(args, "batch_id", None):
@@ -252,18 +193,13 @@ def main(arguments: list[str] | None = None) -> int:
             script_args.append("--incremental")
 
         LOGGER.info(
-            "Khởi chạy Spark Lakehouse Pipeline (Mode=%s, Local=%s, SCD2=%s)...",
+            "Khởi chạy Spark Lakehouse Pipeline (Mode=%s, SCD2=%s)...",
             "INCREMENTAL" if is_incremental else "BOOTSTRAP",
-            env_vars.get("ECOMMERCE_USE_LOCAL_STORAGE", "false"),
             env_vars.get("ECOMMERCE_USE_SCD2", "false"),
         )
         return run_python("SparkEcommerceAnalysis.py", arguments=script_args, env_vars=env_vars)
 
-    script_by_command = {
-        "report": "generate_portfolio_report.py",
-        "mongodb": "InsertMongoDB.py",
-        "thrift": "start_thrift_server.py",
-    }
+    script_by_command = {"report": "build_business_report.py"}
     return run_python(script_by_command[args.command])
 
 

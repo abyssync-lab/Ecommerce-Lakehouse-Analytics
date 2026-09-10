@@ -109,11 +109,11 @@ def test_dim_customer_scd2(spark_session):
     assert records[2]["Is_Current"] == 1
 
 
-def test_certified_line_amount_and_quarantine(spark_session, tmp_path):
-    """Kiểm tra line amount certified và không nhân Shipping_Cost theo số line."""
+def test_gold_line_amount_and_quarantine(spark_session, tmp_path):
+    """Kiểm tra line amount Gold và không nhân Shipping_Cost theo số line."""
     data = [
         ("ORD01", "2026-08-01", 2026, 8, "C001", "Laptop", "Electronics", "Tech", 1, 1000.0, 0.0, 1000.0, 700.0, 300.0, 20.0, 2, "Delivered"),
-        ("ORD01", "2026-08-01", 2026, 8, "C001", "Mouse", "Electronics", "Tech", 2, 25.0, 0.0, 50.0, 30.0, 20.0, 5.0, 1, "Delivered"),
+        ("ORD01", "2026-08-01", 2026, 8, "C001", "Mouse", "Electronics", "Tech", 2, 25.0, 0.0, 50.0, 30.0, 20.0, 20.0, 1, "Delivered"),
         ("ORD_BAD", "2026-08-01", 2026, 8, "C002", "Mouse", "Electronics", "Tech", -1, 25.0, 2.5, 50.0, 30.0, 20.0, 5.0, 1, "Delivered"), # invalid qty AND invalid discount
     ]
     cols = [

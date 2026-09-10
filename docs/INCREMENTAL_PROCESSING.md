@@ -1,12 +1,12 @@
-# Incremental Processing và Control Plane
+# Incremental Processing và Batch Metadata
 
 Incremental processing của GlobalCart được thiết kế theo content identity, không
 theo tên file. Điều này cho phép đổi tên file, retry sau lỗi và phát hiện batch
 ID bị dùng lại với nội dung khác.
 
-## Ba bảng control chính
+## Metadata của batch
 
-### ctl_ingestion_files
+### File manifest
 
 Một row đại diện cho một source file theo khóa:
 
@@ -26,7 +26,7 @@ Các trường quan trọng bám đúng `FileManifest.SCHEMA`:
 File manifest là nơi trả lời file đã được commit vào Bronze chưa. Không đọc chung
 event registry để suy luận trạng thái file.
 
-### ctl_pipeline_runs
+### Pipeline run registry
 
 Một row cho một run_id. Schema lifecycle duy nhất gồm:
 
@@ -44,7 +44,7 @@ pipeline_version, contract_version
 Registry update bằng merge/update theo run_id. Không append các row có schema
 khác nhau cho từng trạng thái.
 
-### ctl_publications
+### Published snapshot
 
 Một pointer cho publication name gold:
 
@@ -88,8 +88,8 @@ không append lại mà khôi phục manifest về trạng thái Bronze committe
 Nếu process chết trong Gold staging, retry cùng run có thể ghi lại path staging
 của run đó. Nếu publication chưa đổi, Power BI vẫn dùng run trước.
 
-Nếu pointer đã đổi nhưng bước registry finalization lỗi, run phải được đánh dấu
-CONTROL_FINALIZATION_PENDING để không che giấu sự thật rằng data plane đã publish.
+Nếu snapshot pointer đã đổi nhưng bước ghi metadata cuối lỗi, run được đánh dấu
+PUBLISH_METADATA_PENDING để không đánh dấu FAILED sai một snapshot đã visible.
 
 ## Lifecycle status
 
@@ -99,7 +99,6 @@ PROCESSING
   -> SILVER_MERGED
   -> GOLD_BUILT
   -> RECONCILED
-  -> READY_TO_PUBLISH
   -> PUBLISHED
 ~~~
 
@@ -107,7 +106,7 @@ Các nhánh lỗi:
 
 - FAILED: lỗi trước publication;
 - SKIPPED: content hash đã xử lý thành công;
-- CONTROL_FINALIZATION_PENDING: pointer đã commit nhưng control update cuối chưa xong.
+- PUBLISH_METADATA_PENDING: snapshot đã commit nhưng metadata update cuối chưa xong.
 
 ## Metrics bắt buộc
 

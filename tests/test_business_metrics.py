@@ -1,5 +1,5 @@
 import pandas as pd
-from portfolio_metrics import aggregate_performance, calculate_overview, safe_ratio
+from business_metrics import aggregate_performance, calculate_overview, safe_ratio
 
 
 def sample_frame():
@@ -44,7 +44,7 @@ def test_aggregate_performance_sorts_by_revenue():
     assert result.iloc[0]["Region"] == "Asia"
 
 
-def test_calculate_overview_accepts_certified_gold_measures():
+def test_calculate_overview_accepts_gold_measures():
     """Gold line fact dùng measure tính lại và không nhân shipping cost theo line."""
     frame = pd.DataFrame(
         [

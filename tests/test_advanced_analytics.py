@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pandas as pd
 import pytest
-from portfolio_metrics import calculate_abc_product_analysis, calculate_rfm_segmentation
+from business_metrics import calculate_abc_product_analysis, calculate_rfm_segmentation
 
 
 @pytest.fixture

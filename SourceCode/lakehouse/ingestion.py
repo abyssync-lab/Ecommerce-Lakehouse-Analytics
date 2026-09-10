@@ -45,9 +45,7 @@ def calculate_source_hash(file_path: str | None) -> str:
         FileNotFoundError: Khi đường dẫn không trỏ tới một file local có thể đọc.
 
     Ghi chú:
-        Không được dùng filename hoặc URI làm nội dung hash. Nếu nguồn là HDFS,
-        caller phải tính hash bằng filesystem client rồi truyền ``source_hash``
-        vào pipeline.
+        Không được dùng filename hoặc URI làm nội dung hash.
     """
     if not file_path:
         raise ValueError("Không thể tính source_hash khi thiếu đường dẫn file nguồn")
@@ -148,30 +146,6 @@ def enrich_with_ingestion_metadata(
     )
 
 
-def record_ingestion_batch(
-    spark: Any,
-    batch_id: str,
-    source_hash: str,
-    row_count: int,
-    status: str = "SUCCESS",
-    run_id: str | None = None,
-) -> None:
-    """Lưu vết metadata batch nạp vào Batch Registry (Audit Trail & Idempotency Control)."""
-    registry = BatchRegistry(spark)
-    if status == "SUCCESS":
-        registry.mark_batch_success(
-            run_id=run_id or f"run_{batch_id}",
-            batch_id=batch_id,
-            row_count=row_count,
-        )
-    else:
-        registry.mark_batch_failed(
-            run_id=run_id or f"run_{batch_id}",
-            batch_id=batch_id,
-            error_message=f"Batch finished with status {status}",
-        )
-
-
 def read_raw_csv(spark: Any, input_path: str | None = None) -> Any:
     """Đọc dữ liệu CSV thô với schema rõ ràng (tránh inferSchema=True gây schema drift).
 
@@ -185,8 +159,8 @@ def read_raw_csv(spark: Any, input_path: str | None = None) -> Any:
     target_path = input_path or SETTINGS.get_input_path()
     LOGGER.info("Bắt đầu đọc dữ liệu CSV thô từ: %s", target_path)
 
-    # Đọc toàn bộ header dưới dạng string để hỗ trợ đồng thời historical v1 và
-    # change-event v2; kiểu dữ liệu chỉ được cast sau khi qua file-level contract.
+    # Đọc header dưới dạng string; kiểu dữ liệu chỉ được cast sau khi qua
+    # file-level contract và bootstrap adapter nếu đây là seed lịch sử.
     raw_df = spark.read.option("header", True).option("inferSchema", False).csv(target_path)
     raw_count = raw_df.count()
     LOGGER.info("Đã đọc xong dữ liệu thô, tổng số dòng: %,d", raw_count)
@@ -255,7 +229,7 @@ def ingest_to_bronze(
     )
 
     # Register trước khi đọc file để FILE_SCHEMA_MISMATCH/FILE_EMPTY cũng có
-    # lifecycle và retry history trong control plane.
+    # lifecycle và lịch sử retry rõ ràng.
     if manage_registry:
         registry.start_run(
             run_id=rid,

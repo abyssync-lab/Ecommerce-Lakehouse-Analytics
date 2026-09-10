@@ -1,8 +1,7 @@
-# Operations, Chạy local và Failure Handling
+# Operations, chạy local và failure handling
 
-Tài liệu này mô tả cách vận hành v1 ở local/CI. Airflow chưa phải dependency
-của pipeline; khi thêm sẽ chỉ gọi cùng package entrypoint, không copy business
-logic vào DAG.
+Tài liệu này mô tả cách vận hành v1 ở local/CI. Pipeline chỉ có một đường chạy
+PySpark local + Delta Lake và không phụ thuộc dịch vụ bên ngoài.
 
 ## Dependencies
 
@@ -24,7 +23,6 @@ python -m pip install -r requirements.txt
 Local storage mặc định:
 
 ~~~powershell
-$env:ECOMMERCE_USE_LOCAL_STORAGE = "true"
 $env:SPARK_LOCAL_IP = "127.0.0.1"
 $env:PYSPARK_PYTHON = "python"
 ~~~
@@ -54,7 +52,7 @@ python SourceCode/SparkEcommerceAnalysis.py --incremental --input Data/sample_ba
 ### Report
 
 ~~~powershell
-python SourceCode/generate_portfolio_report.py --source published
+python SourceCode/build_business_report.py --source published
 ~~~
 
 published là source chuẩn. csv chỉ dành cho independent validation.
@@ -78,7 +76,7 @@ finally:
 Lỗi ở ingestion, quarantine, registry, Gold hoặc reconciliation đều phải đi qua
 mark_failed. Không dùng LOGGER.debug để nuốt lỗi ở control-plane write.
 
-## Certified publication
+## Published snapshot
 
 Mỗi table Gold có Delta transaction riêng nên không thể giả định một transaction
 toàn schema. Publication module:
@@ -89,19 +87,18 @@ toàn schema. Publication module:
 4. cuối cùng mới update ctl_publications current_run_id.
 
 Nếu bước 1 hoặc 2 thất bại, pointer vẫn giữ run cũ. Nếu bước 4 thất bại sau khi
-data đã commit, registry ghi CONTROL_FINALIZATION_PENDING để cần xử lý vận hành.
+data đã commit, registry ghi PUBLISH_METADATA_PENDING để cần xử lý metadata.
 
 ## Failure và retry
 
 | Failure | Hành động |
 |---|---|
 | File schema mismatch | Fail file, không ghi Bronze |
-| Row quality fail | Ghi quarantine, tính reject rate |
-| Reject rate vượt ngưỡng | FAILED, không publish |
+| Row quality fail | Ghi quarantine và tính metrics |
 | Bronze write fail | FAILED, retry sau khi sửa storage |
 | Silver merge fail | FAILED, không đổi publication |
 | Gold reconciliation fail | FAILED, Power BI vẫn dùng run cũ |
-| Registry finalization fail | CONTROL_FINALIZATION_PENDING, kiểm tra pointer |
+| Publish metadata fail | PUBLISH_METADATA_PENDING, kiểm tra snapshot pointer |
 
 Retry phải dùng content hash hiện tại. Không xóa Bronze để “làm lại” một cách
 thủ công, vì điều đó phá audit và có thể làm mất bằng chứng ingestion.
@@ -120,9 +117,8 @@ Theo dõi theo run_id:
 
 Alert khi:
 
-- reject rate vượt ngưỡng;
 - không có publication mới sau lịch chạy;
-- run ở FAILED hoặc CONTROL_FINALIZATION_PENDING;
+- run ở FAILED hoặc PUBLISH_METADATA_PENDING;
 - financial reconciliation khác 0;
 - row count Gold giảm bất thường.
 
@@ -136,7 +132,7 @@ Workflow .github/workflows/quality.yml phải:
 4. parse toàn bộ YAML contract;
 5. chạy unit và Spark integration tests;
 6. validate input contract;
-7. bootstrap certified Gold;
+7. bootstrap Gold;
 8. build report từ published Gold.
 
 Không dùng pytest.skip để che việc thiếu PySpark/Delta trong integration job.
@@ -145,4 +141,4 @@ Không dùng pytest.skip để che việc thiếu PySpark/Delta trong integratio
 
 Reset storage chỉ dành cho môi trường demo/test cô lập. Không xóa Bronze hoặc
 control tables trong môi trường cần audit. Khi cần reset, ghi rõ target path và
-đảm bảo không trỏ vào HDFS hoặc storage production.
+đảm bảo không trỏ nhầm vào dữ liệu cần giữ lại.

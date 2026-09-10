@@ -100,7 +100,7 @@ hoặc merge từ tập event đầy đủ.
 ## Bảo vệ tài chính
 
 Không dùng Revenue hoặc Profit lặp ở mỗi line để tính order-level KPI. Fact
-sales tính từ certified Silver measures. Fact fulfillment tổng hợp line amount
+sales tính từ các measure đã tính lại ở Silver. Fact fulfillment tổng hợp line amount
 theo order, nhưng Shipping_Cost chỉ lấy một lần từ order header.
 
 Reconciliation so sánh cùng status policy:
@@ -110,4 +110,3 @@ Silver Net_Line_Amount
 = Fact Sales Net_Line_Amount
 = Executive Mart metric
 ~~~
-

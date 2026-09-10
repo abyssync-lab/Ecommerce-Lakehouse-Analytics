@@ -38,7 +38,7 @@ def test_invalid_discount_fails_fast():
         assert_quality(validate_business_values(frame))
 
 
-def test_negative_revenue_fails_quality_gate():
+def test_negative_revenue_fails_row_validation():
     frame = pd.read_csv(Path(__file__).parents[1] / "Data" / "EcommerceSalesDataset.csv", nrows=1)
     frame.loc[0, "Revenue"] = -1
     with pytest.raises(ValueError, match="revenue_non_negative"):

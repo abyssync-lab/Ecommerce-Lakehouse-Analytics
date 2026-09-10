@@ -9,7 +9,7 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Any
 
-# Tôn trọng runtime do CI hoặc cluster cung cấp; local mới dùng Python hiện tại.
+# Tôn trọng runtime do CI cung cấp; local dùng chính Python đang chạy.
 os.environ.setdefault("PYSPARK_PYTHON", sys.executable)
 os.environ.setdefault("PYSPARK_DRIVER_PYTHON", sys.executable)
 
@@ -18,9 +18,9 @@ from config import SETTINGS, PipelineConfig, auto_set_spark_home_env
 auto_set_spark_home_env()
 
 os.environ.setdefault("HADOOP_USER_NAME", "hadoop")
-if SETTINGS.use_local_storage and not os.environ.get("SPARK_LOCAL_IP"):
+if not os.environ.get("SPARK_LOCAL_IP"):
     os.environ["SPARK_LOCAL_IP"] = "127.0.0.1"
-if SETTINGS.use_local_storage and not os.environ.get("SPARK_LOCAL_HOSTNAME"):
+if not os.environ.get("SPARK_LOCAL_HOSTNAME"):
     os.environ["SPARK_LOCAL_HOSTNAME"] = "localhost"
 
 from pyspark.sql import SparkSession
@@ -36,9 +36,9 @@ from .ingestion import (
     ingest_to_bronze,
 )
 from .marts import (
-    build_certified_marts,
     build_fact_order_fulfillment,
     build_fact_sales,
+    build_gold_marts,
     build_sales_enriched,
 )
 from .publication import persist_gold_staging, publish_gold_run
@@ -50,12 +50,7 @@ from .silver import (
     build_silver_orders_current,
     clean_and_enrich_silver,
 )
-from .storage import (
-    check_schema_enforcement,
-    check_versioning_and_time_travel,
-    save_and_verify_delta,
-    show_delta_history,
-)
+from .storage import save_and_verify_delta
 
 try:
     from delta import configure_spark_with_delta_pip
@@ -66,20 +61,6 @@ except ImportError as error:
     ) from error
 
 LOGGER = logging.getLogger(__name__)
-
-
-def _enforce_reject_rate(
-    raw_rows: int, rejected_rows: int, max_reject_rate: float | None = None
-) -> None:
-    """Chặn batch có tỷ lệ quarantine vượt ngưỡng vận hành đã cấu hình."""
-    if raw_rows <= 0:
-        return
-    threshold = SETTINGS.max_reject_rate if max_reject_rate is None else max_reject_rate
-    reject_rate = rejected_rows / raw_rows
-    if reject_rate > threshold:
-        raise ValueError(
-            f"REJECT_RATE_EXCEEDED: tỷ lệ quarantine {reject_rate:.2%} vượt ngưỡng {threshold:.2%}"
-        )
 
 
 def _customer_history_source(spark: SparkSession, fallback_df: Any, use_scd2: bool) -> Any | None:
@@ -102,7 +83,6 @@ def _customer_history_source(spark: SparkSession, fallback_df: Any, use_scd2: bo
         run_id="scd2_history_rebuild",
         batch_id="scd2_history_rebuild",
         allow_line_id_fallback=True,
-        record_quality_metrics=False,
     )
     if "Operation" in history.columns:
         history = history.filter(col("Operation") != "DELETE")
@@ -132,28 +112,24 @@ class PipelineRunResult:
     duplicate_rows: int
     reconciliation_passed: bool
     reconciliation_report: dict[str, Any] = field(default_factory=dict)
-    certified_gold_version: int | None = None
+    published_run_id: str | None = None
     error_message: str | None = None
     spark: SparkSession | None = None
 
 
-class PipelineCertificationError(Exception):
-    """Ngoại lệ phát sinh khi Pipeline không vượt qua cổng kiểm toán Reconciliation Gate."""
+class ReconciliationError(Exception):
+    """Ngoại lệ phát sinh khi Gold không vượt qua các kiểm tra đối soát."""
 
     pass
 
 
 def create_spark_session() -> SparkSession:
-    """Khởi tạo và cấu hình SparkSession tích hợp Delta Lake & Hive Metastore."""
-    driver_host = SETTINGS.spark_driver_host or (
-        "127.0.0.1" if SETTINGS.use_local_storage else None
-    )
-    driver_bind = SETTINGS.spark_driver_bind_address or (
-        "127.0.0.1" if SETTINGS.use_local_storage else None
-    )
+    """Khởi tạo SparkSession local tích hợp Delta Lake."""
+    driver_host = SETTINGS.spark_driver_host or "127.0.0.1"
+    driver_bind = SETTINGS.spark_driver_bind_address or "127.0.0.1"
 
     builder = (
-        SparkSession.builder.appName("Global Cart Intelligence Data Lakehouse")
+        SparkSession.builder.appName("GlobalCart Order Lakehouse")
         .config("spark.sql.extensions", "io.delta.sql.DeltaSparkSessionExtension")
         .config(
             "spark.sql.catalog.spark_catalog",
@@ -162,39 +138,14 @@ def create_spark_session() -> SparkSession:
     )
     # Entrypoint được gọi trực tiếp bằng `python`, vì vậy local/CI cần master
     # mặc định thay vì phụ thuộc vào spark-submit đã cấu hình sẵn.
-    master_url = os.getenv("SPARK_MASTER") or ("local[2]" if SETTINGS.use_local_storage else None)
-    if master_url:
-        builder = builder.master(master_url)
+    builder = builder.master(os.getenv("SPARK_MASTER") or "local[2]")
 
     if driver_host:
         builder = builder.config("spark.driver.host", driver_host)
     if driver_bind:
         builder = builder.config("spark.driver.bindAddress", driver_bind)
 
-    if not SETTINGS.use_local_storage:
-        builder = builder.config("spark.hadoop.fs.defaultFS", SETTINGS.hdfs_base)
-
-    try:
-        builder = builder.enableHiveSupport()
-    except Exception:
-        LOGGER.warning(
-            "Không thể bật Hive Support, sẽ chạy Spark local mode không có Hive metastore."
-        )
-
     return configure_spark_with_delta_pip(builder).getOrCreate()
-
-
-def run_delta_demo(spark: SparkSession) -> None:
-    """Chạy các bài thử nghiệm minh họa tính năng Delta Lake (Schema Enforcement, Time Travel, History)."""
-    LOGGER.info("=== BẮT ĐẦU DELTA LAKEHOUSE DEMONSTRATION ===")
-    show_delta_history(spark, SETTINGS.bronze_delta, "BRONZE")
-    show_delta_history(spark, SETTINGS.silver_delta, "SILVER")
-    check_schema_enforcement(spark)
-
-    silver_path = SETTINGS.get_storage_path(SETTINGS.silver_delta)
-    clean_df = spark.read.format("delta").load(silver_path)
-    check_versioning_and_time_travel(spark, clean_df)
-    LOGGER.info("=== HOÀN TẤT DELTA LAKEHOUSE DEMONSTRATION ===")
 
 
 def run_pipeline(
@@ -204,14 +155,14 @@ def run_pipeline(
 ) -> PipelineRunResult:
     """Khởi chạy Medallion Lakehouse Pipeline hoàn chỉnh (Bootstrap Full Mode).
 
-    Quy trình chuẩn hóa Enterprise Lifecycle:
+    Quy trình xử lý một batch:
     1. Ingestion: Xác thực mã băm, kiểm tra sổ cái Batch Registry
     2. Bronze: Lưu trữ dữ liệu thô bất biến
     3. Silver: Ép kiểu, làm sạch, tách Quarantine theo luật hợp đồng
     4. Gold: Xây dựng Kimball Star Schema (FactSales, Dimensions SCD2)
     5. Gold Semantic & Marts: Sinh Canonical Semantic Dataset và Data Marts
-    6. Reconciliation Gate: Kiểm toán các bất biến bắt buộc (Doanh thu, Row conservation, Grain, FK, SCD2)
-    7. Certification: Ghi nhận chứng nhận vào sổ cái nếu PASS, chặn đứng nếu FAIL.
+    6. Gold reconciliation: Kiểm toán row conservation, grain, foreign key và tài chính.
+    7. Published snapshot: Chỉ đổi snapshot Power BI sau khi reconciliation PASS.
 
     Args:
         input_path: Đường dẫn file CSV đầu vào tùy chọn.
@@ -233,7 +184,7 @@ def run_pipeline(
         source_hash = calculate_source_hash(source_uri)
     except Exception as exc:
         # Không thể hash file thì không được giả làm content hash. Sentinel này
-        # chỉ giúp ghi nhận FAILED trong control plane và luôn bị loại khỏi
+        # chỉ giúp ghi nhận FAILED; sentinel này luôn bị loại khỏi
         # idempotency lookup; khi file xuất hiện lại sẽ tính hash thật.
         source_hash = "hash_unavailable"
         source_hash_error = exc
@@ -241,7 +192,7 @@ def run_pipeline(
     batch_id = config.batch_id if config and config.batch_id else f"batch_{uuid.uuid4().hex[:8]}"
 
     LOGGER.info("=====================================================")
-    LOGGER.info("BẮT ĐẦU GLOBAL CART INTELLIGENCE LAKEHOUSE PIPELINE")
+    LOGGER.info("BẮT ĐẦU GLOBALCART ORDER LAKEHOUSE PIPELINE")
     LOGGER.info(
         "Mode: BOOTSTRAP | Run ID: %s | Batch ID: %s | SCD2: %s", run_id, batch_id, effective_scd2
     )
@@ -255,7 +206,7 @@ def run_pipeline(
 
     try:
         # Bootstrap cũng phải replay-safe. Chỉ môi trường demo/reset mới được phép
-        # overwrite một source hash đã certified; run bình thường không được nạp lại.
+        # Một source hash đã publish thì run bình thường không được nạp lại.
         if registry.is_batch_processed(source_hash):
             previous = registry.find_by_source_hash(source_hash)
             LOGGER.warning(
@@ -334,11 +285,6 @@ def run_pipeline(
             bronze_rows - bronze_df.dropDuplicates(subset=bronze_business_columns).count()
         )
         quarantine_rows = max(0, bronze_rows - silver_rows - duplicate_rows)
-        _enforce_reject_rate(
-            bronze_rows,
-            quarantine_rows,
-            config.max_reject_rate if config else None,
-        )
         registry.update_metrics(
             run_id,
             exact_duplicate_rows=duplicate_rows,
@@ -401,12 +347,12 @@ def run_pipeline(
             run_id,
             "gold_semantic",
         )
-        gold_marts = build_certified_marts(sales_enriched, fact_order_fulfillment)
+        gold_marts = build_gold_marts(sales_enriched, fact_order_fulfillment)
         persist_gold_staging(spark, gold_marts, run_id, "gold_mart")
         registry.update_status(run_id, "GOLD_BUILT", gold_run_id=run_id)
 
-        # 4. Chỉ certification sau reconciliation; mọi exception đều đi qua FAILED.
-        LOGGER.info("--- 6. DATA RECONCILIATION & CERTIFICATION GATE ---")
+        # 4. Chỉ publish sau khi Gold reconciliation đạt PASS.
+        LOGGER.info("--- 6. GOLD RECONCILIATION ---")
         recon_report = run_full_reconciliation(
             clean_df=current_silver,
             fact_sales=fact_sales,
@@ -422,16 +368,9 @@ def run_pipeline(
             fact_order_fulfillment=fact_order_fulfillment,
         )
         if recon_report.get("overall_status") != "PASS":
-            raise PipelineCertificationError(
-                f"Pipeline không đạt chứng nhận Reconciliation Gate: {recon_report}"
-            )
-
-        run_demo = config.run_delta_demo if config else SETTINGS.run_delta_demo
-        if run_demo:
-            run_delta_demo(spark)
+            raise ReconciliationError(f"Gold reconciliation không đạt PASS: {recon_report}")
 
         registry.mark_reconciled(run_id)
-        registry.mark_ready_to_publish(run_id)
         publish_gold_run(
             spark,
             {
@@ -446,12 +385,12 @@ def run_pipeline(
         try:
             registry.mark_published(run_id, gold_run_id=run_id, published_version="1")
         except Exception as finalization_error:
-            # Pointer đã commit thì run không được gắn FAILED, vì Power BI đã
-            # nhìn thấy run này; operator cần xử lý trạng thái control pending.
-            registry.mark_control_finalization_pending(run_id, finalization_error)
+            # Snapshot đã đổi nhưng metadata chưa ghi được: giữ trạng thái riêng
+            # để retry không đánh dấu FAILED sai một run đã visible cho Power BI.
+            registry.mark_publish_metadata_pending(run_id, finalization_error)
             raise
 
-        LOGGER.info("HOÀN THÀNH DATA LAKEHOUSE PIPELINE THÀNH CÔNG (CERTIFIED PASS)!")
+        LOGGER.info("HOÀN THÀNH PIPELINE: Gold snapshot đã được publish.")
         pipeline_succeeded = True
         return PipelineRunResult(
             run_id=run_id,
@@ -463,20 +402,20 @@ def run_pipeline(
             duplicate_rows=duplicate_rows,
             reconciliation_passed=True,
             reconciliation_report=recon_report,
-            certified_gold_version=1,
+            published_run_id=run_id,
             spark=spark,
         )
     except Exception as exc:
-        # Registry write failure phải được giữ nguyên để operator biết control plane hỏng.
+        # Registry write failure phải được giữ nguyên để người vận hành biết metadata bị lỗi.
         if run_started:
             current = registry.find_by_run_id(run_id)
-            if current is None or current["status"] != "CONTROL_FINALIZATION_PENDING":
+            if current is None or current["status"] != "PUBLISH_METADATA_PENDING":
                 registry.mark_failed(
                     run_id,
                     exc,
                     error_code=(
                         "RECONCILIATION_FAILED"
-                        if isinstance(exc, PipelineCertificationError)
+                        if isinstance(exc, ReconciliationError)
                         else "SOURCE_FILE_NOT_FOUND"
                         if isinstance(exc, FileNotFoundError)
                         else "PIPELINE_FAILED"
@@ -507,7 +446,7 @@ def run_incremental_pipeline(
     2. Bronze: Append dữ liệu mới kèm Ingestion Metadata
     3. Silver: Làm sạch, lọc Quarantine và MERGE INTO theo stable Order_Line_ID grain
     4. Gold: Cập nhật Star Schema và deterministic refresh Gold Marts
-    5. Reconciliation Gate: Kiểm toán các bất biến bắt buộc trước khi chứng nhận.
+    5. Gold reconciliation: Kiểm toán các bất biến bắt buộc trước khi publish snapshot.
     """
     effective_scd2 = (
         use_scd2 if use_scd2 is not None else (config.use_scd2 if config else SETTINGS.use_scd2)
@@ -546,7 +485,7 @@ def run_incremental_pipeline(
     try:
         already_processed = registry.is_batch_processed(shash)
     except Exception:
-        # Nếu control plane không đọc được, không được để Spark do function sở hữu
+        # Nếu metadata không đọc được, không được để Spark do function sở hữu
         # chạy ngầm sau khi caller đã nhận lỗi.
         if owns_spark:
             spark.stop()
@@ -587,7 +526,7 @@ def run_incremental_pipeline(
         run_started = True
 
         # Đăng ký file trước file-level validation để schema lỗi vẫn xuất hiện
-        # trong control plane và có thể phân biệt với file chưa từng được phát hiện.
+        # trong metadata và có thể phân biệt với file chưa từng được phát hiện.
         manifest.register_discovered(
             source_system="ecommerce_csv",
             source_hash=shash,
@@ -624,7 +563,7 @@ def run_incremental_pipeline(
             bronze_committed = True
             if not manifest.is_bronze_committed("ecommerce_csv", shash):
                 # Khôi phục manifest nếu process chết sau Delta commit nhưng
-                # trước bước cập nhật control plane.
+                # trước bước cập nhật metadata.
                 manifest.register_discovered(
                     source_system="ecommerce_csv",
                     source_hash=shash,
@@ -664,7 +603,7 @@ def run_incremental_pipeline(
             )
             enriched_batch.write.format("delta").mode("append").save(bronze_path)
             # Delta append đã thành công; registry file chỉ là bước cập nhật
-            # control plane tiếp theo và không được đánh đồng hai sự kiện này.
+            # cập nhật metadata tiếp theo và không được đánh đồng hai sự kiện này.
             bronze_committed = True
             manifest.mark_bronze_committed(
                 source_system="ecommerce_csv",
@@ -710,12 +649,6 @@ def run_incremental_pipeline(
         batch_duplicate_count = raw_count - deduplicated_batch_count
         batch_rejected_count = max(0, raw_count - batch_duplicate_count - valid_count)
         sequence_conflict_count = 0
-        _enforce_reject_rate(
-            raw_count,
-            batch_rejected_count,
-            config.max_reject_rate if config else None,
-        )
-
         # 3. Silver MERGE: chỉ dùng stable key của contract v2, tuyệt đối không fallback
         # sang Product_Name hay các thuộc tính mutable.
         silver_path = SETTINGS.get_storage_path(SETTINGS.silver_delta)
@@ -791,12 +724,6 @@ def run_incremental_pipeline(
                 )
                 valid_count -= sequence_conflict_count
                 batch_rejected_count += sequence_conflict_count
-                _enforce_reject_rate(
-                    raw_count,
-                    batch_rejected_count,
-                    config.max_reject_rate if config else None,
-                )
-
                 # Tính lại comparison trên đúng tập event được phép merge.
                 comparison = merge_batch.alias("source").join(
                     target_snapshot.alias("target"),
@@ -846,11 +773,6 @@ def run_incremental_pipeline(
                 )
                 valid_count -= orphan_delete_rows
                 batch_rejected_count += orphan_delete_rows
-                _enforce_reject_rate(
-                    raw_count,
-                    batch_rejected_count,
-                    config.max_reject_rate if config else None,
-                )
                 merge_batch = merge_batch.join(
                     orphan_deletes.select("Order_ID", "Order_Line_ID").dropDuplicates(),
                     on=["Order_ID", "Order_Line_ID"],
@@ -929,11 +851,6 @@ def run_incremental_pipeline(
                 )
                 valid_count -= orphan_delete_rows
                 batch_rejected_count += orphan_delete_rows
-                _enforce_reject_rate(
-                    raw_count,
-                    batch_rejected_count,
-                    config.max_reject_rate if config else None,
-                )
                 merge_batch = silver_inserts
             if inserted_rows == 0:
                 raise ValueError(
@@ -1011,11 +928,11 @@ def run_incremental_pipeline(
             "gold_semantic",
         )
 
-        gold_marts = build_certified_marts(sales_enriched, fact_order_fulfillment)
+        gold_marts = build_gold_marts(sales_enriched, fact_order_fulfillment)
         persist_gold_staging(spark, gold_marts, run_id, "gold_mart")
         registry.update_status(run_id, "GOLD_BUILT", gold_run_id=run_id)
 
-        # 5. Reconciliation Gate chạy sau khi mọi Gold output đã được ghi.
+        # 5. Đối soát sau khi mọi Gold output đã được ghi.
         recon_report = run_full_reconciliation(
             clean_df=active_silver,
             fact_sales=fact_sales,
@@ -1032,12 +949,11 @@ def run_incremental_pipeline(
         )
 
         if recon_report.get("overall_status") != "PASS":
-            raise PipelineCertificationError(
-                f"Incremental Pipeline không đạt chứng nhận Reconciliation Gate: {recon_report}"
+            raise ReconciliationError(
+                f"Incremental Gold reconciliation không đạt PASS: {recon_report}"
             )
 
         registry.mark_reconciled(run_id)
-        registry.mark_ready_to_publish(run_id)
         publish_gold_run(
             spark,
             {
@@ -1052,10 +968,10 @@ def run_incremental_pipeline(
         try:
             registry.mark_published(run_id, gold_run_id=run_id, published_version="2")
         except Exception as finalization_error:
-            registry.mark_control_finalization_pending(run_id, finalization_error)
+            registry.mark_publish_metadata_pending(run_id, finalization_error)
             raise
 
-        LOGGER.info("--- THÀNH CÔNG: INCREMENTAL PIPELINE HOÀN TẤT VÀ ĐƯỢC CHỨNG NHẬN ---")
+        LOGGER.info("--- THÀNH CÔNG: INCREMENTAL GOLD SNAPSHOT ĐÃ ĐƯỢC PUBLISH ---")
         return PipelineRunResult(
             run_id=run_id,
             batch_id=bid,
@@ -1066,22 +982,22 @@ def run_incremental_pipeline(
             duplicate_rows=batch_duplicate_count,
             reconciliation_passed=True,
             reconciliation_report=recon_report,
-            certified_gold_version=2,
+            published_run_id=run_id,
             spark=spark,
         )
     except Exception as exc:
-        # Bất kỳ lỗi nào ở Bronze/Silver/Gold/Reconciliation đều phải làm control plane
+        # Bất kỳ lỗi nào ở Bronze/Silver/Gold/Reconciliation đều phải làm metadata
         # chuyển FAILED để lần retry sau được phân biệt với một run đang chạy dở.
         try:
             if run_started:
                 current = registry.find_by_run_id(run_id)
-                if current is None or current["status"] != "CONTROL_FINALIZATION_PENDING":
+                if current is None or current["status"] != "PUBLISH_METADATA_PENDING":
                     registry.mark_failed(
                         run_id,
                         exc,
                         error_code=(
                             "RECONCILIATION_FAILED"
-                            if isinstance(exc, PipelineCertificationError)
+                            if isinstance(exc, ReconciliationError)
                             else "PIPELINE_FAILED"
                         ),
                     )

@@ -118,7 +118,7 @@ def test_row_count_conservation(spark_session, tmp_path):
     assert duplicate_count == 1
 
 
-def test_data_reconciliation_gate_full_report(spark_session, tmp_path):
+def test_gold_reconciliation_full_report(spark_session, tmp_path):
     """Kiểm tra hàm run_full_reconciliation xuất kết quả PASS và sinh báo cáo JSON hợp lệ."""
     data = [
         ("ORD01", "2026-08-01", 2026, 8, "C001", "Male", "Consumer", "Laptop Pro", "Electronics", "Tech", 1, 1000.0, 0.0, 1000.0, 700.0, 300.0, 20.0, 2, "Delivered", "Card", "Standard", "Asia", "Vietnam"),

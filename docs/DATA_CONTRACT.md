@@ -4,9 +4,9 @@ Tài liệu này mô tả contract điều khiển cách một file OMS được
 đưa vào Bronze/Silver. Contract là một phần của data product, không phải chỉ là
 documentation.
 
-## Contract được hỗ trợ
+## Contract runtime
 
-File chính cho incremental flow là:
+Contract canonical cho batch order-change là:
 
 ~~~text
 contracts/ecommerce_order_change_v2.yaml
@@ -21,8 +21,9 @@ Contract v2 có:
 - sequence column: Source_Updated_At
 - operation column: Operation
 
-Contract cũ ecommerce_order.yaml chỉ phục vụ tương thích và bootstrap lịch sử.
-Batch incremental mới phải theo v2.
+Dataset seed hiện tại có schema lịch sử cũ hơn nên `ecommerce_order.yaml` chỉ
+được dùng tại bootstrap adapter. Mọi batch incremental phải theo canonical v2;
+adapter không được chạy trong incremental flow.
 
 ## Grain và business key
 
@@ -143,4 +144,3 @@ Thay đổi contract phải:
 
 Đổi Order_Line_ID hoặc Source_Updated_At là breaking change. Phải có migration
 strategy, không chỉ sửa tên cột.
-

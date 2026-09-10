@@ -76,7 +76,6 @@ def test_invalid_event_time_is_quarantined(spark_session, tmp_path):
         quarantine_path=str(tmp_path / "quarantine"),
         run_id="run_invalid_event_time",
         batch_id="batch_invalid_event_time",
-        record_quality_metrics=False,
     )
 
     assert clean.count() == 1

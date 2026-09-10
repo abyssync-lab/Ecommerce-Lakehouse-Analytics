@@ -1,4 +1,4 @@
-"""Kiểm tra nhanh file CSV trước khi đưa lên HDFS."""
+"""Kiểm tra nhanh file CSV trước khi đưa vào Bronze."""
 
 from __future__ import annotations
 

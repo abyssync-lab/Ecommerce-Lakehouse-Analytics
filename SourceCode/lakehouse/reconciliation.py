@@ -1,4 +1,4 @@
-"""Module đối soát tính toàn vẹn và bất biến dữ liệu (Data Reconciliation Gate).
+"""Module đối soát tính toàn vẹn và bất biến dữ liệu Gold.
 
 Thực hiện các kiểm tra bất biến toán học và tính toàn vẹn khóa ngoại xuyên suốt các tầng:
 1. Bất biến Doanh thu (Revenue Invariant): Silver == FactSales == Mart Overview
@@ -20,22 +20,24 @@ from pyspark.sql.functions import col, count, countDistinct, lead, when
 from pyspark.sql.functions import sum as spark_sum
 from pyspark.sql.window import Window
 
+from .marts import load_business_policy
+
 LOGGER = logging.getLogger(__name__)
 
 
 def reconcile_revenue_invariant(
     clean_df: Any, fact_sales: Any, mart_overview: Any
 ) -> dict[str, Any]:
-    """Kiểm tra Silver certified amount == Fact == Executive overview."""
-    certified_policy = "Delivered" if "Delivered_Revenue" in mart_overview.columns else None
+    """Kiểm tra Silver amount == Fact == Executive overview theo cùng policy."""
+    revenue_policy = load_business_policy()["recognized_revenue"]
     silver_input = (
-        clean_df.filter(col("Order_Status") == certified_policy)
-        if certified_policy and "Order_Status" in clean_df.columns
+        clean_df.filter(col("Order_Status").isin(revenue_policy))
+        if "Delivered_Revenue" in mart_overview.columns and "Order_Status" in clean_df.columns
         else clean_df
     )
     fact_input = (
-        fact_sales.filter(col("Order_Status") == certified_policy)
-        if certified_policy and "Order_Status" in fact_sales.columns
+        fact_sales.filter(col("Order_Status").isin(revenue_policy))
+        if "Delivered_Revenue" in mart_overview.columns and "Order_Status" in fact_sales.columns
         else fact_sales
     )
     silver_column = "Net_Line_Amount" if "Net_Line_Amount" in silver_input.columns else "Revenue"
@@ -102,10 +104,8 @@ def reconcile_fk_completeness(fact_sales: Any) -> dict[str, Any]:
         "CustomerKey",
         "ProductKey",
         "DateKey",
-        "LocationKey",
-        "PaymentKey",
-        "ShippingKey",
-        "StatusKey",
+        "GeographyKey",
+        "ContextKey",
     ]
     null_counts: dict[str, int] = {}
     for fk in fk_cols:
@@ -219,7 +219,7 @@ def run_full_reconciliation(
     silver_order_lines_current: Any | None = None,
     fact_order_fulfillment: Any | None = None,
 ) -> dict[str, Any]:
-    """Thực thi toàn bộ bộ kiểm thử Data Reconciliation Gate và xuất báo cáo JSON.
+    """Thực thi toàn bộ kiểm tra đối soát và xuất báo cáo JSON.
 
     Args:
         clean_df: DataFrame sạch tầng Silver.
@@ -238,7 +238,7 @@ def run_full_reconciliation(
         Dictionary chứa kết quả toàn bộ các kiểm tra đối soát.
     """
     rid = run_id or f"recon_{uuid.uuid4().hex[:8]}"
-    LOGGER.info("=== BẮT ĐẦU DATA RECONCILIATION GATE (Run ID: %s) ===", rid)
+    LOGGER.info("=== BẮT ĐẦU GOLD RECONCILIATION (Run ID: %s) ===", rid)
 
     rev_check = reconcile_revenue_invariant(clean_df, fact_sales, mart_overview)
     row_check = reconcile_row_conservation(
@@ -294,7 +294,7 @@ def run_full_reconciliation(
         },
     }
 
-    LOGGER.info("Kết quả Reconciliation Gate: %s", report["overall_status"])
+    LOGGER.info("Kết quả Gold reconciliation: %s", report["overall_status"])
 
     if export_path:
         out_path = Path(export_path)

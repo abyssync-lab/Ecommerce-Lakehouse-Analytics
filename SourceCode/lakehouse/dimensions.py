@@ -201,32 +201,24 @@ def build_dim_customer_scd2(clean_df: Any) -> Any:
     )
 
 
-def build_dim_location(clean_df: Any) -> Any:
-    """Xây dựng Dimension Location."""
+def build_dim_geography(clean_df: Any) -> Any:
+    """Xây dựng geography dimension ở grain Region-Country."""
     dim = clean_df.select("Region", "Country").dropDuplicates()
-    dim = add_surrogate_key(dim, "LocationKey", ["Region", "Country"])
-    return dim.select("LocationKey", "Region", "Country")
+    dim = add_surrogate_key(dim, "GeographyKey", ["Region", "Country"])
+    return dim.select("GeographyKey", "Region", "Country")
 
 
-def build_dim_payment(clean_df: Any) -> Any:
-    """Xây dựng Dimension Payment."""
-    dim = clean_df.select("Payment_Method").dropDuplicates()
-    dim = add_surrogate_key(dim, "PaymentKey", ["Payment_Method"])
-    return dim.select("PaymentKey", "Payment_Method")
-
-
-def build_dim_shipping(clean_df: Any) -> Any:
-    """Xây dựng Dimension Shipping."""
-    dim = clean_df.select("Shipping_Method", "Delivery_Level").dropDuplicates()
-    dim = add_surrogate_key(dim, "ShippingKey", ["Shipping_Method", "Delivery_Level"])
-    return dim.select("ShippingKey", "Shipping_Method", "Delivery_Level")
-
-
-def build_dim_order_status(clean_df: Any) -> Any:
-    """Xây dựng Dimension Order Status."""
-    dim = clean_df.select("Order_Status", "Is_Returned", "Is_Cancelled").dropDuplicates()
-    dim = add_surrogate_key(dim, "StatusKey", ["Order_Status"])
-    return dim.select("StatusKey", "Order_Status", "Is_Returned", "Is_Cancelled")
+def build_dim_order_context(clean_df: Any) -> Any:
+    """Gộp các thuộc tính cardinality thấp của order thành một context dimension."""
+    context_columns = [
+        "Order_Status",
+        "Payment_Method",
+        "Shipping_Method",
+        "Delivery_Level",
+    ]
+    dim = clean_df.select(*context_columns).dropDuplicates()
+    dim = add_surrogate_key(dim, "ContextKey", context_columns)
+    return dim.select("ContextKey", *context_columns)
 
 
 def build_dim_date(spark: Any, clean_df: Any) -> Any:
@@ -264,16 +256,14 @@ def build_all_dimensions(
     customer_history_df: Any | None = None,
 ) -> dict[str, Any]:
     """Tạo các dimension; SCD2 có thể nhận toàn bộ customer event history từ Bronze."""
-    LOGGER.info("Bắt đầu xây dựng 7 bảng Dimension Kimball Star Schema...")
+    LOGGER.info("Bắt đầu xây dựng 5 bảng Dimension Kimball...")
     customer_source = customer_history_df if customer_history_df is not None else clean_df
     dims = {
         "dim_product": build_dim_product(clean_df),
         "dim_customer": build_dim_customer(customer_source, use_scd2=use_scd2),
-        "dim_location": build_dim_location(clean_df),
-        "dim_payment": build_dim_payment(clean_df),
-        "dim_shipping": build_dim_shipping(clean_df),
-        "dim_order_status": build_dim_order_status(clean_df),
+        "dim_geography": build_dim_geography(clean_df),
+        "dim_order_context": build_dim_order_context(clean_df),
         "dim_date": build_dim_date(spark, clean_df),
     }
-    LOGGER.info("Đã tạo hoàn tất 7 bảng Dimension.")
+    LOGGER.info("Đã tạo hoàn tất 5 bảng Dimension.")
     return dims
