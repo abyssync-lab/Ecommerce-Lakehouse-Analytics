@@ -1,4 +1,4 @@
-"""Module định nghĩa các quy tắc kiểm tra chất lượng dữ liệu và Data Contract.
+"""Mô-đun định nghĩa các quy tắc kiểm tra chất lượng dữ liệu và Data Contract.
 
 Có thể sử dụng độc lập trên DataFrame Pandas hoặc tích hợp vào Pipeline PySpark
 để ngăn ngừa dữ liệu lỗi đi vào tầng Silver / Gold Lakehouse.
@@ -97,7 +97,7 @@ def validate_business_values(df: pd.DataFrame) -> QualityReportSummary:
 
     results: list[QualityResult] = [col_res]
 
-    # Rule 1: Quantity > 0
+    # Quy tắc 1: Quantity > 0.
     inv_qty = int((df["Quantity"] <= 0).sum())
     results.append(
         QualityResult(
@@ -109,7 +109,7 @@ def validate_business_values(df: pd.DataFrame) -> QualityReportSummary:
         )
     )
 
-    # Rule 2: Unit_Price >= 0
+    # Quy tắc 2: Unit_Price >= 0.
     inv_price = int((df["Unit_Price"] < 0).sum())
     results.append(
         QualityResult(
@@ -121,7 +121,7 @@ def validate_business_values(df: pd.DataFrame) -> QualityReportSummary:
         )
     )
 
-    # Rule 3: Discount in [0, 1]
+    # Quy tắc 3: Discount nằm trong [0, 1].
     inv_disc = int((~df["Discount"].between(0, 1)).sum())
     results.append(
         QualityResult(
@@ -133,7 +133,7 @@ def validate_business_values(df: pd.DataFrame) -> QualityReportSummary:
         )
     )
 
-    # Rule 4: Revenue >= 0
+    # Quy tắc 4: Revenue >= 0.
     inv_rev = int((df["Revenue"] < 0).sum())
     results.append(
         QualityResult(
@@ -145,7 +145,7 @@ def validate_business_values(df: pd.DataFrame) -> QualityReportSummary:
         )
     )
 
-    # Rule 5: Shipping_Days >= 0
+    # Quy tắc 5: Shipping_Days >= 0.
     inv_ship = int((df["Shipping_Days"] < 0).sum())
     results.append(
         QualityResult(
@@ -157,7 +157,7 @@ def validate_business_values(df: pd.DataFrame) -> QualityReportSummary:
         )
     )
 
-    # Rule 6: Expected Revenue Formula Check
+    # Quy tắc 6: Kiểm tra công thức doanh thu kỳ vọng.
     expected_rev = df["Quantity"] * df["Unit_Price"] * (1 - df["Discount"])
     inv_formula = int(((df["Revenue"] - expected_rev).abs() > 0.05).sum())
     results.append(
@@ -170,7 +170,7 @@ def validate_business_values(df: pd.DataFrame) -> QualityReportSummary:
         )
     )
 
-    # Rule 7: Allowed Order Statuses
+    # Quy tắc 7: Order_Status thuộc danh sách được phép.
     inv_status = int((~df["Order_Status"].isin(ALLOWED_ORDER_STATUSES)).sum())
     results.append(
         QualityResult(

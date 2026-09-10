@@ -43,7 +43,7 @@ def run_python(
 
 
 def run_quality_checks() -> int:
-    """Chạy chuỗi kiểm tra nhanh tính hợp lệ dữ liệu, sinh báo cáo và Unit Tests.
+    """Chạy chuỗi kiểm tra nhanh dữ liệu, sinh báo cáo và kiểm thử đơn vị.
 
     Returns:
         Mã thoát 0 nếu toàn bộ quy trình kiểm tra thành công.

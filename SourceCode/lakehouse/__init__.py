@@ -1,13 +1,21 @@
-"""Package Lakehouse chứa các module xử lý Medallion Data Lakehouse bằng PySpark & Delta Lake."""
+"""Các mô-đun xử lý kiến trúc Medallion bằng PySpark và Delta Lake."""
 
 from __future__ import annotations
 
-try:
-    from .pipeline import run_incremental_pipeline, run_pipeline
-    from .reconciliation import run_full_reconciliation
-except ImportError:
-    run_incremental_pipeline = None  # type: ignore
-    run_pipeline = None  # type: ignore
-    run_full_reconciliation = None  # type: ignore
-
 __all__ = ["run_pipeline", "run_incremental_pipeline", "run_full_reconciliation"]
+
+
+def __getattr__(name: str):
+    """Nạp API công khai theo nhu cầu mà không che giấu lỗi phụ thuộc."""
+    if name in {"run_pipeline", "run_incremental_pipeline"}:
+        from .pipeline import run_incremental_pipeline, run_pipeline
+
+        return {
+            "run_pipeline": run_pipeline,
+            "run_incremental_pipeline": run_incremental_pipeline,
+        }[name]
+    if name == "run_full_reconciliation":
+        from .reconciliation import run_full_reconciliation
+
+        return run_full_reconciliation
+    raise AttributeError(f"module {__name__!r} không có thuộc tính {name!r}")

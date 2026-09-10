@@ -1,7 +1,7 @@
-"""Module đọc, phân tích và thực thi hợp đồng dữ liệu (Executable Data Contract).
+"""Mô-đun đọc, phân tích và thực thi hợp đồng dữ liệu.
 
-Đóng vai trò Single Source of Truth cho toàn bộ Schema, Ràng buộc kiểm tra chất lượng (DQ),
-và Business Keys từ file `contracts/ecommerce_order.yaml`.
+Đây là nguồn quy tắc duy nhất cho schema, kiểm tra chất lượng và Business Keys
+được khai báo trong các file `contracts/*.yaml`.
 """
 
 from __future__ import annotations
@@ -176,10 +176,7 @@ def get_spark_raw_schema(contract: DatasetContract | None = None) -> Any:
 
     Tránh inferSchema=True gây schema drift giữa các batch.
     """
-    try:
-        from pyspark.sql.types import StringType, StructField, StructType
-    except ImportError:
-        return None
+    from pyspark.sql.types import StringType, StructField, StructType
 
     c = contract or load_contract()
     fields = [StructField(col_name, StringType(), True) for col_name in c.columns.keys()]

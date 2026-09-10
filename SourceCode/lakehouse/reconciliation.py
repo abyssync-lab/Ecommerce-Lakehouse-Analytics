@@ -1,11 +1,11 @@
-"""Module đối soát tính toàn vẹn và bất biến dữ liệu Gold.
+"""Mô-đun đối soát tính toàn vẹn và bất biến dữ liệu Gold.
 
 Thực hiện các kiểm tra bất biến toán học và tính toàn vẹn khóa ngoại xuyên suốt các tầng:
-1. Bất biến Doanh thu (Revenue Invariant): Silver == FactSales == Mart Overview
-2. Bất biến Số dòng (Row Conservation): Raw == Valid + Invalid + Duplicate
-3. Tính Duy nhất của Fact Grain: Distinct(SalesKey) == Count(FactSales)
-4. Toàn vẹn Khóa ngoại (FK Completeness): Zero orphan foreign keys
-5. Toàn vẹn Chiều SCD2 (SCD2 Temporal Integrity): Không chồng lấn, đúng 1 Is_Current=1 / customer
+1. Bất biến doanh thu: Silver == FactSales == Mart Overview.
+2. Bảo toàn số dòng: Raw == Valid + Invalid + Duplicate.
+3. Grain Fact duy nhất: Distinct(SalesKey) == Count(FactSales).
+4. Đầy đủ khóa ngoại: Không có foreign key mồ côi.
+5. Toàn vẹn thời gian SCD2: Không chồng lấn, đúng 1 Is_Current=1 cho mỗi customer.
 """
 
 from __future__ import annotations
@@ -28,7 +28,7 @@ LOGGER = logging.getLogger(__name__)
 def reconcile_revenue_invariant(
     clean_df: Any, fact_sales: Any, mart_overview: Any
 ) -> dict[str, Any]:
-    """Kiểm tra Silver amount == Fact == Executive overview theo cùng policy."""
+    """Kiểm tra amount của Silver == Fact == Executive overview theo cùng policy."""
     revenue_policy = load_business_policy()["recognized_revenue"]
     silver_input = (
         clean_df.filter(col("Order_Status").isin(revenue_policy))
@@ -197,7 +197,7 @@ def reconcile_scd2_temporal_integrity(dim_customer: Any) -> dict[str, Any]:
         col("_next_valid_from").isNotNull() & (col("ValidTo") > col("_next_valid_from"))
     ).count()
 
-    # 3. Bao gồm cả customer có 0 current row; chỉ group các row Is_Current=1
+    # 3. Bao gồm cả customer có 0 dòng hiện hành; chỉ group các dòng Is_Current=1
     # sẽ bỏ sót trường hợp này.
     current_counts = dim_customer.groupBy("Customer_ID").agg(
         count("CustomerKey").alias("version_cnt"),

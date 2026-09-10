@@ -1,4 +1,4 @@
-"""Unit tests cho các trường hợp biên của validation, RFM và ABC."""
+"""Kiểm thử các trường hợp biên của validation, RFM và ABC."""
 
 from __future__ import annotations
 

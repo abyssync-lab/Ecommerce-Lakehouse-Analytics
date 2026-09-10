@@ -1,4 +1,4 @@
-"""Module kiểm tra chẩn đoán môi trường hệ thống (System Environment Doctor).
+"""Mô-đun chẩn đoán môi trường thực thi.
 
 Xác minh tính khả dụng của Java, Python, Pandas, PySpark và Delta Lake.
 trước khi khởi chạy các quy trình xử lý dữ liệu.

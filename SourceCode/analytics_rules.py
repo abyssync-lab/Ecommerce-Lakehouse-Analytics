@@ -1,7 +1,7 @@
-"""Module quản lý tập trung các quy tắc phân tích kinh doanh (Business Analytics Rules).
+"""Mô-đun tập trung các quy tắc phân tích kinh doanh của GlobalCart.
 
-Single Source of Truth cho các thuật toán phân hạng khách hàng RFM (Recency, Frequency, Monetary)
-và Phân loại sản phẩm Pareto ABC. Được sử dụng chung bởi cả Pandas Engine và PySpark Lakehouse.
+Đây là nguồn quy tắc duy nhất cho phân hạng khách hàng RFM (Recency, Frequency, Monetary)
+và phân loại sản phẩm Pareto ABC. Pandas và PySpark Lakehouse cùng sử dụng các quy tắc này.
 """
 
 from __future__ import annotations
@@ -78,7 +78,7 @@ def _filter_metric_rows(dataframe: pd.DataFrame, metric: str) -> pd.DataFrame:
 
 
 def _measure_column(dataframe: pd.DataFrame, gold_name: str, fallback_name: str) -> str:
-    """Chọn measure đã chứng nhận trước measure nguồn tương thích ngược."""
+    """Chọn measure đã chứng nhận; chỉ dùng measure nguồn khi cần tương thích dữ liệu cũ."""
     if gold_name in dataframe.columns:
         return gold_name
     if fallback_name in dataframe.columns:
@@ -143,7 +143,7 @@ def calculate_rfm_pandas(
     analysis_date: str | pd.Timestamp | None = None,
     thresholds: RFMThresholds = DEFAULT_RFM_THRESHOLDS,
 ) -> pd.DataFrame:
-    """Phân hạng khách hàng RFM bằng Pandas Engine sử dụng quy tắc chuẩn hóa.
+    """Phân hạng khách hàng RFM bằng Pandas theo quy tắc chuẩn hóa.
 
     Args:
         dataframe: DataFrame chứa các dòng giao dịch.
@@ -199,7 +199,7 @@ def calculate_abc_pandas(
     dataframe: pd.DataFrame,
     thresholds: ABCThresholds = DEFAULT_ABC_THRESHOLDS,
 ) -> pd.DataFrame:
-    """Phân loại sản phẩm Pareto ABC bằng Pandas Engine sử dụng quy tắc chuẩn hóa.
+    """Phân loại sản phẩm Pareto ABC bằng Pandas theo quy tắc chuẩn hóa.
 
     Args:
         dataframe: DataFrame chứa các dòng giao dịch.

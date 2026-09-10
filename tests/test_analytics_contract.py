@@ -8,7 +8,7 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
-# Thêm SourceCode vào sys.path
+# Thêm SourceCode vào sys.path.
 SOURCE_DIR = Path(__file__).resolve().parents[1] / "SourceCode"
 if str(SOURCE_DIR) not in sys.path:
     sys.path.insert(0, str(SOURCE_DIR))
@@ -18,7 +18,7 @@ from analytics_rules import calculate_abc_pandas, calculate_rfm_pandas
 
 @pytest.fixture
 def shared_analytics_fixture() -> pd.DataFrame:
-    """Tạo tập dữ liệu giao dịch chuẩn để so sánh hai engine Pandas và Spark."""
+    """Tạo tập dữ liệu giao dịch chuẩn để so sánh Pandas và Spark."""
     return pd.DataFrame(
         {
             "Order_ID": ["ORD01", "ORD02", "ORD03", "ORD04", "ORD05", "ORD06", "ORD07"],

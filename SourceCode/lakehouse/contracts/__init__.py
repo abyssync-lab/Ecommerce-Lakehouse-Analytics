@@ -1,4 +1,4 @@
-"""Package quản lý và thực thi Data Contracts trong Medallion Lakehouse."""
+"""Các mô-đun quản lý và thực thi Data Contract trong Medallion Lakehouse."""
 
 from .loader import (
     ColumnContract,

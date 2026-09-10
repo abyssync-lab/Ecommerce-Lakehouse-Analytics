@@ -1,4 +1,4 @@
-"""Module xây dựng FactSales và các Data Marts tầng Gold trong Data Lakehouse."""
+"""Mô-đun xây dựng FactSales và các Data Mart ở tầng Gold của Data Lakehouse."""
 
 from __future__ import annotations
 
@@ -147,7 +147,7 @@ def build_fact_sales(
 
     dim_cust = dimensions["dim_customer"]
     if "ValidFrom" in dim_cust.columns and "ValidTo" in dim_cust.columns:
-        # SCD Type 2 Temporal Join
+        # Join theo thời gian với SCD Type 2.
         fact_event_time = (
             col("Source_Updated_At") if "Source_Updated_At" in fact.columns else col("Order_Date")
         )
@@ -159,7 +159,7 @@ def build_fact_sales(
             how="left",
         ).drop(dim_cust["Customer_ID"])
     else:
-        # Standard SCD Type 1 Join (guaranteed 1 Customer_ID = 1 row in dim_customer)
+        # Join SCD Type 1 chuẩn; dim_customer bảo đảm mỗi Customer_ID chỉ có 1 dòng.
         fact = fact.join(dim_cust, on=["Customer_ID"], how="left")
     fact = fact.join(dimensions["dim_geography"], on=["Region", "Country"], how="left")
     fact = fact.join(
@@ -230,7 +230,7 @@ def build_fact_order_fulfillment(
         round(spark_sum("Net_Line_Amount"), 2).alias("Order_Value"),
         round(spark_sum("Gross_Profit"), 2).alias("Order_Profit"),
     )
-    # Order fact chỉ đại diện cho order còn ít nhất một line active. Nếu dùng
+    # Fact order chỉ đại diện cho order còn ít nhất một dòng hiện hành. Nếu dùng
     # left join, order đã xóa toàn bộ line sẽ vẫn xuất hiện với measure NULL.
     orders = silver_orders_current.filter(~col("Is_Deleted")).join(
         line_metrics, on="Order_ID", how="inner"
@@ -514,7 +514,7 @@ def build_gold_marts(
 def build_sales_enriched(fact_sales: Any, dimensions: dict[str, Any]) -> Any:
     """Xây dựng Gold Semantic Base (`gold_sales_enriched`) kết nối FactSales và Dimensions.
 
-    Tạo một nguồn chân lý kinh doanh duy nhất (Single Source of Truth) cho toàn bộ Gold Marts,
+    Tạo một nguồn dữ liệu kinh doanh duy nhất cho toàn bộ Gold Marts,
     đảm bảo tính nhất quán tuyệt đối giữa mô hình Kimball và các Mart phục vụ BI / Reporting.
     """
     enriched = fact_sales

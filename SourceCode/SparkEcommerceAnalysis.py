@@ -1,6 +1,6 @@
-"""Pipeline ETL xử lý Data Lakehouse (Bronze -> Silver -> Gold) bằng PySpark & Delta Lake.
+"""Pipeline ETL xử lý Data Lakehouse (Bronze -> Silver -> Gold) bằng PySpark và Delta Lake.
 
-Wrapper tương thích ngược ủy quyền xử lý cho package `lakehouse.pipeline`.
+Đây là điểm vào tương thích với lệnh cũ; logic nghiệp vụ nằm trong `lakehouse.pipeline`.
 """
 
 from __future__ import annotations
@@ -8,7 +8,7 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-# Thêm SourceCode vào sys.path để import lakehouse package
+# Thêm SourceCode vào sys.path để nạp mã nguồn lakehouse.
 SOURCE_DIR = Path(__file__).resolve().parent
 if str(SOURCE_DIR) not in sys.path:
     sys.path.insert(0, str(SOURCE_DIR))
@@ -41,7 +41,7 @@ def main() -> None:
         source_uri = args.input or SETTINGS.get_input_path()
         source_hash = "hash_unavailable"
         # Hash phải được tính từ bytes của file trước khi DataFrame đi vào pipeline;
-        # không dùng batch_id làm giả source identity.
+        # không dùng batch_id làm giả định danh nguồn.
         try:
             source_hash = calculate_source_hash(source_uri)
             new_batch_df = read_raw_csv(spark, args.input)
@@ -64,7 +64,7 @@ def main() -> None:
                 else "FILE_SCHEMA_MISMATCH"
             )
             # File manifest phải ghi cả thất bại trước Bronze để operator biết
-            # source đã được phát hiện nhưng chưa commit và có thể retry.
+            # nguồn đã được phát hiện nhưng chưa commit và có thể thử lại.
             manifest = FileManifest(spark)
             manifest.register_discovered(
                 source_system="ecommerce_csv",

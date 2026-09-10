@@ -1,4 +1,4 @@
-"""Module nạp dữ liệu thô (Ingestion Layer) cho Lakehouse Pipeline."""
+"""Mô-đun nạp dữ liệu thô cho tầng Bronze của Lakehouse Pipeline."""
 
 from __future__ import annotations
 
@@ -9,19 +9,15 @@ from pathlib import Path
 from typing import Any
 
 from config import SETTINGS
-
-try:
-    from pyspark.sql.functions import (
-        col,
-        current_timestamp,
-        lit,
-        monotonically_increasing_id,
-        sha2,
-        struct,
-        to_json,
-    )
-except ImportError:
-    col = current_timestamp = input_file_name = lit = sha2 = struct = to_json = None  # type: ignore
+from pyspark.sql.functions import (
+    col,
+    current_timestamp,
+    lit,
+    monotonically_increasing_id,
+    sha2,
+    struct,
+    to_json,
+)
 
 from .contracts.loader import load_contract_for_columns
 from .file_manifest import FileManifest

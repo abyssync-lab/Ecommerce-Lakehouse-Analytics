@@ -1,4 +1,4 @@
-"""Unit test kiểm thử hai mô hình phân tích nâng cao: RFM Customer Segmentation và Pareto ABC Analysis."""
+"""Kiểm thử đơn vị cho phân khúc khách hàng RFM và phân loại sản phẩm Pareto ABC."""
 
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ from business_metrics import calculate_abc_product_analysis, calculate_rfm_segme
 
 @pytest.fixture
 def sample_sales_data() -> pd.DataFrame:
-    """Tạo dữ liệu giao dịch giả lập để test thuật toán."""
+    """Tạo dữ liệu giao dịch giả lập để kiểm thử thuật toán."""
     return pd.DataFrame(
         {
             "Order_ID": ["ORD001", "ORD002", "ORD003", "ORD004", "ORD005", "ORD006"],

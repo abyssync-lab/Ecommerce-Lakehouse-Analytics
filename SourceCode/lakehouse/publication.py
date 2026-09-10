@@ -101,7 +101,7 @@ def publish_gold_run(spark: Any, tables: dict[str, Any], run_id: str) -> None:
         else:
             published.write.format("delta").mode("overwrite").save(serving_path)
 
-    # Lần publish đầu tiên cần có pointer placeholder để Spark resolve được view.
+    # Lần publish đầu tiên cần có giá trị mồi để Spark phân giải được view.
     publication_target = resolve_path(PUBLICATION_PATH)
     if not DeltaTable.isDeltaTable(spark, publication_target):
         _upsert_publication_pointer(spark, "__NONE__")

@@ -1,11 +1,11 @@
 """Bộ kiểm thử các bất biến của order lakehouse.
 
 Kiểm chứng các thuộc tính cốt lõi của Data Lakehouse:
-1. Idempotency: Cùng một source hash không bao giờ bị append trùng vào Bronze
-2. Stable Grain: Các micro-batch của cùng một Order không ghi đè chéo dòng sản phẩm
-3. Executable Contract: contracts/ecommerce_order.yaml là nguồn chân lý thực thi duy nhất
-4. Gold reconciliation: Pipeline dừng ngay khi bất biến dữ liệu bị vi phạm
-5. Canonical Lineage: FactSales và Gold Marts bảo toàn 100% doanh thu và tính toán
+1. Idempotency: Cùng một source hash không bao giờ bị append trùng vào Bronze.
+2. Grain ổn định: Các micro-batch của cùng một Order không ghi đè chéo dòng sản phẩm.
+3. Contract thực thi: contracts/ecommerce_order.yaml là nguồn quy tắc runtime duy nhất.
+4. Đối soát Gold: Pipeline dừng ngay khi bất biến dữ liệu bị vi phạm.
+5. Lineage chuẩn: FactSales và Gold Marts bảo toàn 100% doanh thu và phép tính.
 """
 
 from __future__ import annotations
@@ -23,6 +23,7 @@ from lakehouse.contracts.loader import load_contract, load_contract_for_columns
 from lakehouse.dimensions import build_all_dimensions
 from lakehouse.ingestion import calculate_source_hash
 from lakehouse.marts import build_all_marts, build_fact_sales, build_sales_enriched
+from lakehouse.pipeline import PipelineRunResult
 from lakehouse.reconciliation import run_full_reconciliation
 from lakehouse.registry import BatchConflictError, BatchRegistry
 from lakehouse.silver import clean_and_enrich_silver
@@ -58,18 +59,85 @@ def test_change_contract_v2_is_selected_for_incremental_event_shape():
 def test_order_line_key_is_stable_across_micro_batches(spark_session):
     """BẢO VỆ P0: Hai micro-batch chứa các dòng khác nhau của cùng 1 đơn hàng KHÔNG trùng Order_Line_ID."""
     cols = [
-        "Order_ID", "Order_Date", "Year", "Month", "Customer_ID", "Customer_Gender", "Customer_Segment",
-        "Product_Name", "Category", "Sub_Category", "Quantity", "Unit_Price", "Discount",
-        "Revenue", "Cost", "Profit", "Shipping_Cost", "Shipping_Days", "Order_Status",
-        "Payment_Method", "Shipping_Method", "Region", "Country"
+        "Order_ID",
+        "Order_Date",
+        "Year",
+        "Month",
+        "Customer_ID",
+        "Customer_Gender",
+        "Customer_Segment",
+        "Product_Name",
+        "Category",
+        "Sub_Category",
+        "Quantity",
+        "Unit_Price",
+        "Discount",
+        "Revenue",
+        "Cost",
+        "Profit",
+        "Shipping_Cost",
+        "Shipping_Days",
+        "Order_Status",
+        "Payment_Method",
+        "Shipping_Method",
+        "Region",
+        "Country",
     ]
     # Batch 1: Order ORD-99 mua Laptop Pro
     b1_data = [
-        ("ORD-99", "2026-08-01", 2026, 8, "C100", "Male", "Consumer", "Laptop Pro", "Tech", "PC", 1, 1000.0, 0.0, 1000.0, 700.0, 300.0, 20.0, 2, "Delivered", "Card", "Standard", "Asia", "Vietnam")
+        (
+            "ORD-99",
+            "2026-08-01",
+            2026,
+            8,
+            "C100",
+            "Male",
+            "Consumer",
+            "Laptop Pro",
+            "Tech",
+            "PC",
+            1,
+            1000.0,
+            0.0,
+            1000.0,
+            700.0,
+            300.0,
+            20.0,
+            2,
+            "Delivered",
+            "Card",
+            "Standard",
+            "Asia",
+            "Vietnam",
+        )
     ]
     # Batch 2: Cùng Order ORD-99 nhưng mua thêm Mouse Pro (giao dịch phát sinh sau hoặc bổ sung)
     b2_data = [
-        ("ORD-99", "2026-08-01", 2026, 8, "C100", "Male", "Consumer", "Mouse Pro", "Tech", "Accessory", 1, 50.0, 0.0, 50.0, 30.0, 20.0, 5.0, 2, "Delivered", "Card", "Standard", "Asia", "Vietnam")
+        (
+            "ORD-99",
+            "2026-08-01",
+            2026,
+            8,
+            "C100",
+            "Male",
+            "Consumer",
+            "Mouse Pro",
+            "Tech",
+            "Accessory",
+            1,
+            50.0,
+            0.0,
+            50.0,
+            30.0,
+            20.0,
+            5.0,
+            2,
+            "Delivered",
+            "Card",
+            "Standard",
+            "Asia",
+            "Vietnam",
+        )
     ]
 
     df1 = spark_session.createDataFrame(b1_data, cols)
@@ -146,13 +214,56 @@ def test_registry_uses_one_schema_and_rejects_batch_id_conflict(spark_session, t
 def test_reconciliation_fails_when_revenue_discrepant(spark_session):
     """Kiểm tra Gold reconciliation phát hiện FAIL khi số liệu doanh thu bị lệch."""
     cols = [
-        "Order_ID", "Order_Date", "Year", "Month", "Customer_ID", "Customer_Gender", "Customer_Segment",
-        "Product_Name", "Category", "Sub_Category", "Quantity", "Unit_Price", "Discount",
-        "Revenue", "Cost", "Profit", "Shipping_Cost", "Shipping_Days", "Order_Status",
-        "Payment_Method", "Shipping_Method", "Region", "Country"
+        "Order_ID",
+        "Order_Date",
+        "Year",
+        "Month",
+        "Customer_ID",
+        "Customer_Gender",
+        "Customer_Segment",
+        "Product_Name",
+        "Category",
+        "Sub_Category",
+        "Quantity",
+        "Unit_Price",
+        "Discount",
+        "Revenue",
+        "Cost",
+        "Profit",
+        "Shipping_Cost",
+        "Shipping_Days",
+        "Order_Status",
+        "Payment_Method",
+        "Shipping_Method",
+        "Region",
+        "Country",
     ]
     data = [
-        ("ORD01", "2026-08-01", 2026, 8, "C001", "Male", "Consumer", "Laptop Pro", "Electronics", "Tech", 1, 1000.0, 0.0, 1000.0, 700.0, 300.0, 20.0, 2, "Delivered", "Card", "Standard", "Asia", "Vietnam")
+        (
+            "ORD01",
+            "2026-08-01",
+            2026,
+            8,
+            "C001",
+            "Male",
+            "Consumer",
+            "Laptop Pro",
+            "Electronics",
+            "Tech",
+            1,
+            1000.0,
+            0.0,
+            1000.0,
+            700.0,
+            300.0,
+            20.0,
+            2,
+            "Delivered",
+            "Card",
+            "Standard",
+            "Asia",
+            "Vietnam",
+        )
     ]
     df = spark_session.createDataFrame(data, cols)
     clean_df = clean_and_enrich_silver(df)
@@ -160,8 +271,10 @@ def test_reconciliation_fails_when_revenue_discrepant(spark_session):
     fact = build_fact_sales(clean_df, dims)
     marts = build_all_marts(clean_df)
 
-    # Cố tình giả lập tạo sự sai lệch doanh thu trong overview mart
-    corrupted_mart = marts["mart_overview"].withColumn("Total_Revenue", col("Total_Revenue") + 999.0)
+    # Cố tình giả lập sai lệch doanh thu trong overview mart.
+    corrupted_mart = marts["mart_overview"].withColumn(
+        "Total_Revenue", col("Total_Revenue") + 999.0
+    )
 
     report = run_full_reconciliation(
         clean_df=clean_df,
@@ -181,14 +294,81 @@ def test_reconciliation_fails_when_revenue_discrepant(spark_session):
 def test_gold_sales_enriched_and_marts_consistency(spark_session):
     """Kiểm tra tính nhất quán 100% giữa Canonical Semantic Base (gold_sales_enriched) và FactSales."""
     cols = [
-        "Order_ID", "Order_Date", "Year", "Month", "Customer_ID", "Customer_Gender", "Customer_Segment",
-        "Product_Name", "Category", "Sub_Category", "Quantity", "Unit_Price", "Discount",
-        "Revenue", "Cost", "Profit", "Shipping_Cost", "Shipping_Days", "Order_Status",
-        "Payment_Method", "Shipping_Method", "Region", "Country"
+        "Order_ID",
+        "Order_Date",
+        "Year",
+        "Month",
+        "Customer_ID",
+        "Customer_Gender",
+        "Customer_Segment",
+        "Product_Name",
+        "Category",
+        "Sub_Category",
+        "Quantity",
+        "Unit_Price",
+        "Discount",
+        "Revenue",
+        "Cost",
+        "Profit",
+        "Shipping_Cost",
+        "Shipping_Days",
+        "Order_Status",
+        "Payment_Method",
+        "Shipping_Method",
+        "Region",
+        "Country",
     ]
     data = [
-        ("ORD01", "2026-08-01", 2026, 8, "C001", "Male", "Consumer", "Laptop Pro", "Electronics", "Tech", 1, 1200.0, 0.0, 1200.0, 800.0, 400.0, 25.0, 2, "Delivered", "Card", "Standard", "Asia", "Vietnam"),
-        ("ORD02", "2026-08-02", 2026, 8, "C002", "Female", "Corporate", "Mouse Pro", "Electronics", "Tech", 2, 50.0, 0.1, 90.0, 40.0, 50.0, 5.0, 1, "Delivered", "Card", "Standard", "Asia", "Vietnam"),
+        (
+            "ORD01",
+            "2026-08-01",
+            2026,
+            8,
+            "C001",
+            "Male",
+            "Consumer",
+            "Laptop Pro",
+            "Electronics",
+            "Tech",
+            1,
+            1200.0,
+            0.0,
+            1200.0,
+            800.0,
+            400.0,
+            25.0,
+            2,
+            "Delivered",
+            "Card",
+            "Standard",
+            "Asia",
+            "Vietnam",
+        ),
+        (
+            "ORD02",
+            "2026-08-02",
+            2026,
+            8,
+            "C002",
+            "Female",
+            "Corporate",
+            "Mouse Pro",
+            "Electronics",
+            "Tech",
+            2,
+            50.0,
+            0.1,
+            90.0,
+            40.0,
+            50.0,
+            5.0,
+            1,
+            "Delivered",
+            "Card",
+            "Standard",
+            "Asia",
+            "Vietnam",
+        ),
     ]
     df = spark_session.createDataFrame(data, cols)
     clean_df = clean_and_enrich_silver(df)
@@ -239,28 +419,14 @@ def test_calculate_source_hash_idempotency(tmp_path):
     hash2 = calculate_source_hash(str(file2))
     hash3 = calculate_source_hash(str(file3))
 
-    assert hash1 == hash2, "Hai file cùng nội dung nhưng khác tên phải sinh ra hash giống nhau để chống duplicate!"
+    assert hash1 == hash2, (
+        "Hai file cùng nội dung nhưng khác tên phải sinh ra hash giống nhau để chống duplicate!"
+    )
     assert hash1 != hash3, "Nội dung file khác nhau phải sinh ra hash khác nhau!"
 
 
 def test_pipeline_run_result_dataclass_contract():
     """Kiểm tra PipelineRunResult khởi tạo đúng các trường của một run."""
-    try:
-        from lakehouse.pipeline import PipelineRunResult
-    except ImportError:
-        from dataclasses import dataclass
-
-        @dataclass
-        class PipelineRunResult:  # type: ignore
-            run_id: str
-            batch_id: str
-            status: str
-            bronze_rows: int
-            silver_rows: int
-            quarantine_rows: int
-            duplicate_rows: int
-            reconciliation_passed: bool
-
     res = PipelineRunResult(
         run_id="run_123",
         batch_id="batch_456",

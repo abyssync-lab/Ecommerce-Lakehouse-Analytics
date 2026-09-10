@@ -1,11 +1,11 @@
-"""Unit test cho các module trong tầng PySpark Medallion Lakehouse (marts, dimensions, silver)."""
+"""Kiểm thử các mô-đun marts, dimensions và silver của tầng PySpark Medallion Lakehouse."""
 
 from __future__ import annotations
 
 import sys
 from pathlib import Path
 
-# Add SourceCode to sys.path
+# Thêm SourceCode vào sys.path.
 SOURCE_DIR = Path(__file__).resolve().parents[1] / "SourceCode"
 if str(SOURCE_DIR) not in sys.path:
     sys.path.insert(0, str(SOURCE_DIR))
@@ -24,14 +24,90 @@ from pyspark.sql.functions import col
 def test_marts_when_import_and_rfm_abc(spark_session):
     """Kiểm tra build_rfm_mart và build_abc_mart hoạt động bình thường không gặp NameError 'when'."""
     data = [
-        ("ORD01", "2026-08-01", "CUST01", "Laptop Pro", "Electronics", "Tech", 1, 1000.0, 0.0, 1000.0, 700.0, 300.0, 20.0, 2, "Delivered", "Card", "Standard", "Asia", "Vietnam"),
-        ("ORD02", "2026-08-10", "CUST01", "Mouse", "Electronics", "Tech", 2, 25.0, 0.0, 50.0, 30.0, 20.0, 5.0, 1, "Delivered", "Card", "Standard", "Asia", "Vietnam"),
-        ("ORD03", "2026-08-20", "CUST02", "Keyboard", "Electronics", "Tech", 1, 50.0, 0.0, 50.0, 30.0, 20.0, 5.0, 1, "Delivered", "Card", "Standard", "Asia", "Vietnam"),
+        (
+            "ORD01",
+            "2026-08-01",
+            "CUST01",
+            "Laptop Pro",
+            "Electronics",
+            "Tech",
+            1,
+            1000.0,
+            0.0,
+            1000.0,
+            700.0,
+            300.0,
+            20.0,
+            2,
+            "Delivered",
+            "Card",
+            "Standard",
+            "Asia",
+            "Vietnam",
+        ),
+        (
+            "ORD02",
+            "2026-08-10",
+            "CUST01",
+            "Mouse",
+            "Electronics",
+            "Tech",
+            2,
+            25.0,
+            0.0,
+            50.0,
+            30.0,
+            20.0,
+            5.0,
+            1,
+            "Delivered",
+            "Card",
+            "Standard",
+            "Asia",
+            "Vietnam",
+        ),
+        (
+            "ORD03",
+            "2026-08-20",
+            "CUST02",
+            "Keyboard",
+            "Electronics",
+            "Tech",
+            1,
+            50.0,
+            0.0,
+            50.0,
+            30.0,
+            20.0,
+            5.0,
+            1,
+            "Delivered",
+            "Card",
+            "Standard",
+            "Asia",
+            "Vietnam",
+        ),
     ]
     cols = [
-        "Order_ID", "Order_Date", "Customer_ID", "Product_Name", "Category", "Sub_Category",
-        "Quantity", "Unit_Price", "Discount", "Revenue", "Cost", "Profit", "Shipping_Cost",
-        "Shipping_Days", "Order_Status", "Payment_Method", "Shipping_Method", "Region", "Country"
+        "Order_ID",
+        "Order_Date",
+        "Customer_ID",
+        "Product_Name",
+        "Category",
+        "Sub_Category",
+        "Quantity",
+        "Unit_Price",
+        "Discount",
+        "Revenue",
+        "Cost",
+        "Profit",
+        "Shipping_Cost",
+        "Shipping_Days",
+        "Order_Status",
+        "Payment_Method",
+        "Shipping_Method",
+        "Region",
+        "Country",
     ]
     df = spark_session.createDataFrame(data, cols)
     df = clean_and_enrich_silver(df)
@@ -48,26 +124,87 @@ def test_marts_when_import_and_rfm_abc(spark_session):
 def test_dim_customer_deduplication_prevents_fact_duplication(spark_session):
     """Đảm bảo dim_customer deduplicate theo Customer_ID, tránh nhân đôi số lượng Fact Sales."""
     data = [
-        ("ORD01", "2026-08-01", "C001", "Male", "Consumer", "Laptop Pro", "Electronics", "Tech", 1, 1000.0, 0.0, 1000.0, 700.0, 300.0, 20.0, 2, "Delivered", "Card", "Standard", "Asia", "Vietnam"),
-        ("ORD02", "2026-08-05", "C001", "Male", "Corporate", "Mouse", "Electronics", "Tech", 1, 50.0, 0.0, 50.0, 30.0, 20.0, 5.0, 1, "Delivered", "Card", "Standard", "Asia", "Vietnam"),
+        (
+            "ORD01",
+            "2026-08-01",
+            "C001",
+            "Male",
+            "Consumer",
+            "Laptop Pro",
+            "Electronics",
+            "Tech",
+            1,
+            1000.0,
+            0.0,
+            1000.0,
+            700.0,
+            300.0,
+            20.0,
+            2,
+            "Delivered",
+            "Card",
+            "Standard",
+            "Asia",
+            "Vietnam",
+        ),
+        (
+            "ORD02",
+            "2026-08-05",
+            "C001",
+            "Male",
+            "Corporate",
+            "Mouse",
+            "Electronics",
+            "Tech",
+            1,
+            50.0,
+            0.0,
+            50.0,
+            30.0,
+            20.0,
+            5.0,
+            1,
+            "Delivered",
+            "Card",
+            "Standard",
+            "Asia",
+            "Vietnam",
+        ),
     ]
     cols = [
-        "Order_ID", "Order_Date", "Customer_ID", "Customer_Gender", "Customer_Segment",
-        "Product_Name", "Category", "Sub_Category", "Quantity", "Unit_Price", "Discount",
-        "Revenue", "Cost", "Profit", "Shipping_Cost", "Shipping_Days", "Order_Status",
-        "Payment_Method", "Shipping_Method", "Region", "Country"
+        "Order_ID",
+        "Order_Date",
+        "Customer_ID",
+        "Customer_Gender",
+        "Customer_Segment",
+        "Product_Name",
+        "Category",
+        "Sub_Category",
+        "Quantity",
+        "Unit_Price",
+        "Discount",
+        "Revenue",
+        "Cost",
+        "Profit",
+        "Shipping_Cost",
+        "Shipping_Days",
+        "Order_Status",
+        "Payment_Method",
+        "Shipping_Method",
+        "Region",
+        "Country",
     ]
     df = spark_session.createDataFrame(data, cols)
     clean_df = clean_and_enrich_silver(df)
 
     dim_cust = build_dim_customer(clean_df)
-    # dim_customer must have exactly 1 row for Customer C001
+    # dim_customer phải chỉ có đúng 1 dòng cho Customer C001.
     assert dim_cust.filter(col("Customer_ID") == "C001").count() == 1
 
     dims = build_all_dimensions(spark_session, clean_df)
     fact = build_fact_sales(clean_df, dims)
 
-    # Fact sales count must equal original clean records (2 rows, not 4)
+    # Số dòng FactSales phải bằng số bản ghi sạch ban đầu (2 dòng, không phải 4).
     assert fact.count() == 2
 
 
@@ -90,19 +227,19 @@ def test_dim_customer_scd2(spark_session):
     assert scd2_df.count() == 3
 
     records = scd2_df.orderBy("ValidFrom").collect()
-    # Version 1: Consumer (2026-01-01 -> 2026-06-01, not current)
+    # Phiên bản 1: Consumer (2026-01-01 -> 2026-06-01, không hiện hành).
     assert records[0]["Customer_Segment"] == "Consumer"
     assert str(records[0]["ValidFrom"]) == "2026-01-01"
     assert str(records[0]["ValidTo"]) == "2026-06-01"
     assert records[0]["Is_Current"] == 0
 
-    # Version 2: Corporate (2026-06-01 -> 2026-10-01, not current)
+    # Phiên bản 2: Corporate (2026-06-01 -> 2026-10-01, không hiện hành).
     assert records[1]["Customer_Segment"] == "Corporate"
     assert str(records[1]["ValidFrom"]) == "2026-06-01"
     assert str(records[1]["ValidTo"]) == "2026-10-01"
     assert records[1]["Is_Current"] == 0
 
-    # Version 3: Consumer (2026-10-01 -> 9999-12-31, current)
+    # Phiên bản 3: Consumer (2026-10-01 -> 9999-12-31, hiện hành).
     assert records[2]["Customer_Segment"] == "Consumer"
     assert str(records[2]["ValidFrom"]) == "2026-10-01"
     assert str(records[2]["ValidTo"]) == "9999-12-31"
@@ -112,21 +249,89 @@ def test_dim_customer_scd2(spark_session):
 def test_gold_line_amount_and_quarantine(spark_session, tmp_path):
     """Kiểm tra line amount Gold và không nhân Shipping_Cost theo số line."""
     data = [
-        ("ORD01", "2026-08-01", 2026, 8, "C001", "Laptop", "Electronics", "Tech", 1, 1000.0, 0.0, 1000.0, 700.0, 300.0, 20.0, 2, "Delivered"),
-        ("ORD01", "2026-08-01", 2026, 8, "C001", "Mouse", "Electronics", "Tech", 2, 25.0, 0.0, 50.0, 30.0, 20.0, 20.0, 1, "Delivered"),
-        ("ORD_BAD", "2026-08-01", 2026, 8, "C002", "Mouse", "Electronics", "Tech", -1, 25.0, 2.5, 50.0, 30.0, 20.0, 5.0, 1, "Delivered"), # invalid qty AND invalid discount
+        (
+            "ORD01",
+            "2026-08-01",
+            2026,
+            8,
+            "C001",
+            "Laptop",
+            "Electronics",
+            "Tech",
+            1,
+            1000.0,
+            0.0,
+            1000.0,
+            700.0,
+            300.0,
+            20.0,
+            2,
+            "Delivered",
+        ),
+        (
+            "ORD01",
+            "2026-08-01",
+            2026,
+            8,
+            "C001",
+            "Mouse",
+            "Electronics",
+            "Tech",
+            2,
+            25.0,
+            0.0,
+            50.0,
+            30.0,
+            20.0,
+            20.0,
+            1,
+            "Delivered",
+        ),
+        (
+            "ORD_BAD",
+            "2026-08-01",
+            2026,
+            8,
+            "C002",
+            "Mouse",
+            "Electronics",
+            "Tech",
+            -1,
+            25.0,
+            2.5,
+            50.0,
+            30.0,
+            20.0,
+            5.0,
+            1,
+            "Delivered",
+        ),  # quantity không hợp lệ và discount không hợp lệ
     ]
     cols = [
-        "Order_ID", "Order_Date", "Year", "Month", "Customer_ID", "Product_Name", "Category", "Sub_Category",
-        "Quantity", "Unit_Price", "Discount", "Revenue", "Cost", "Profit", "Shipping_Cost",
-        "Shipping_Days", "Order_Status"
+        "Order_ID",
+        "Order_Date",
+        "Year",
+        "Month",
+        "Customer_ID",
+        "Product_Name",
+        "Category",
+        "Sub_Category",
+        "Quantity",
+        "Unit_Price",
+        "Discount",
+        "Revenue",
+        "Cost",
+        "Profit",
+        "Shipping_Cost",
+        "Shipping_Days",
+        "Order_Status",
     ]
     raw_df = spark_session.createDataFrame(data, cols)
     quarantine_dir = str(tmp_path / "quarantine_test")
 
     clean_df = clean_and_enrich_silver(raw_df, quarantine_path=quarantine_dir)
 
-    # Valid rows must be 2
+    # Phải còn đúng 2 dòng hợp lệ.
     assert clean_df.count() == 2
 
     amounts = clean_df.filter(col("Order_ID") == "ORD01").select("Net_Line_Amount").collect()
@@ -137,7 +342,7 @@ def test_gold_line_amount_and_quarantine(spark_session, tmp_path):
     assert order["Order_Total_Revenue"] == 1050.0
     assert order["Order_Shipping_Cost"] == 20.0
 
-    # Check Order_Line_ID existence and uniqueness
+    # Kiểm tra Order_Line_ID tồn tại và không trùng.
     assert "Order_Line_ID" in clean_df.columns
     line_ids = [r["Order_Line_ID"] for r in clean_df.select("Order_Line_ID").collect()]
     assert len(line_ids) == len(set(line_ids))
@@ -146,13 +351,45 @@ def test_gold_line_amount_and_quarantine(spark_session, tmp_path):
 def test_quarantine_multi_reason_array(spark_session, tmp_path):
     """Kiểm tra bảng Quarantine ghi nhận danh sách mảng đa lỗi (rejection_reasons)."""
     data = [
-        # Vi phạm cả Quantity <= 0 VÀ Discount > 1
-        ("ORD_MULTI_ERR", "2026-08-01", 2026, 8, "C001", "Laptop", "Electronics", "Tech", -5, 100.0, 2.5, 100.0, 70.0, 30.0, 10.0, 2, "Delivered"),
+        # Vi phạm đồng thời Quantity <= 0 và Discount > 1.
+        (
+            "ORD_MULTI_ERR",
+            "2026-08-01",
+            2026,
+            8,
+            "C001",
+            "Laptop",
+            "Electronics",
+            "Tech",
+            -5,
+            100.0,
+            2.5,
+            100.0,
+            70.0,
+            30.0,
+            10.0,
+            2,
+            "Delivered",
+        ),
     ]
     cols = [
-        "Order_ID", "Order_Date", "Year", "Month", "Customer_ID", "Product_Name", "Category", "Sub_Category",
-        "Quantity", "Unit_Price", "Discount", "Revenue", "Cost", "Profit", "Shipping_Cost",
-        "Shipping_Days", "Order_Status"
+        "Order_ID",
+        "Order_Date",
+        "Year",
+        "Month",
+        "Customer_ID",
+        "Product_Name",
+        "Category",
+        "Sub_Category",
+        "Quantity",
+        "Unit_Price",
+        "Discount",
+        "Revenue",
+        "Cost",
+        "Profit",
+        "Shipping_Cost",
+        "Shipping_Days",
+        "Order_Status",
     ]
     raw_df = spark_session.createDataFrame(data, cols)
     quarantine_dir = str(tmp_path / "quarantine_multi_err")

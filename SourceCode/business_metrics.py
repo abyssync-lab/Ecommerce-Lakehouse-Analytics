@@ -1,6 +1,6 @@
 """Tính KPI, RFM và ABC độc lập với Spark.
 
-Module này dùng Pandas cho unit test và kiểm tra chéo kết quả Gold.
+Module này dùng Pandas cho kiểm thử đơn vị và kiểm tra chéo kết quả Gold.
 """
 
 from __future__ import annotations

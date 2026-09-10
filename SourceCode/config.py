@@ -53,7 +53,7 @@ def _env_bool(name: str, default: bool = False) -> bool:
 
 @dataclass(frozen=True)
 class Settings:
-    """Quản lý tập trung toàn bộ cấu hình vận hành của Pipeline và Data Lakehouse."""
+    """Quản lý tập trung toàn bộ cấu hình vận hành của pipeline và Data Lakehouse."""
 
     # V1 chỉ dùng local filesystem để có một đường chạy tái lập được.
     local_storage_base: str = os.getenv(

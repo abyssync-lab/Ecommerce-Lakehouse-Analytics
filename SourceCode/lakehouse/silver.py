@@ -1,4 +1,4 @@
-"""Module làm sạch và kiểm định dữ liệu (Silver Layer) trong Medallion Lakehouse."""
+"""Mô-đun làm sạch và kiểm định dữ liệu ở tầng Silver của Medallion Lakehouse."""
 
 from __future__ import annotations
 
@@ -73,7 +73,7 @@ def validate_silver_data(
     )
 
     failed = []
-    # DELETE chỉ mang khóa + sequence metadata; không áp dụng các rule tài chính
+    # DELETE chỉ mang khóa và metadata thứ tự; không áp dụng các quy tắc tài chính
     # của UPSERT lên những event này.
     validation_df = (
         clean_df.filter(col("Operation") != "DELETE")
@@ -130,23 +130,23 @@ def clean_and_enrich_silver(
     raw_count = raw_df.count()
     LOGGER.info("Bắt đầu quy trình làm sạch dữ liệu tầng Silver...")
 
-    # Deduplicate theo business grain (loại trừ metadata kỹ thuật) và tính chính xác số lượng trùng lặp
+    # Loại trùng theo grain nghiệp vụ (loại trừ metadata kỹ thuật) và tính chính xác số lượng trùng.
     biz_cols = [c for c in raw_df.columns if not c.startswith("_")]
     dedup_df = raw_df.dropDuplicates(subset=biz_cols) if biz_cols else raw_df.dropDuplicates()
     duplicate_count = raw_count - dedup_df.count()
     typed_df = dedup_df
 
-    # Adapter giúp bootstrap historical dataset cũ tương thích với contract event v2.
-    # Incremental mode không được tự sinh line id; caller truyền False để bắt lỗi nguồn.
+    # Bộ chuyển đổi giúp bootstrap dataset lịch sử cũ theo contract event v2.
+    # Chế độ incremental không được tự sinh line id; bên gọi truyền False để bắt lỗi nguồn.
     if "Product_Name" not in typed_df.columns and "Product_ID" in typed_df.columns:
         typed_df = typed_df.withColumn("Product_Name", col("Product_ID"))
     if "Product_ID" not in typed_df.columns and "Product_Name" in typed_df.columns:
-        # Historical bootstrap chỉ được phép sinh natural key Product_ID từ
+        # Bootstrap lịch sử chỉ được phép sinh natural key Product_ID từ
         # Product_Name; incremental v2 bắt buộc upstream gửi Product_ID thật.
         typed_df = typed_df.withColumn("Product_ID", sha2(trim(col("Product_Name")), 256))
 
     # Event v2 cho incremental bắt buộc có Product_ID ở mức dòng UPSERT.
-    # Đưa cột còn thiếu về NULL để rule quality tạo MISSING_PRODUCT_ID thay vì
+    # Đưa cột còn thiếu về NULL để quy tắc chất lượng tạo MISSING_PRODUCT_ID thay vì
     # để lỗi schema phát nổ muộn hơn trong lúc build dimension.
     is_incremental_event = not allow_line_id_fallback and {
         "Order_Line_ID",
@@ -181,7 +181,7 @@ def clean_and_enrich_silver(
     for required_text in ["Customer_ID", "Order_Status"]:
         if required_text not in typed_df.columns:
             # Không gán Unknown cho khóa/semantic status bắt buộc của UPSERT;
-            # để rule quarantine báo đúng lỗi nguồn.
+            # để quy tắc quarantine báo đúng lỗi nguồn.
             typed_df = typed_df.withColumn(required_text, lit(None).cast("string"))
     for numeric_column, spark_type in [
         ("Quantity", "int"),
@@ -193,7 +193,7 @@ def clean_and_enrich_silver(
             typed_df = typed_df.withColumn(numeric_column, lit(None).cast(spark_type))
     if "Revenue" not in typed_df.columns:
         # Contract v2 không bắt upstream gửi Revenue; đây là số liệu audit
-        # tùy chọn, không được gán công thức rồi gọi nhầm là source value.
+        # tùy chọn, không được gán công thức rồi gọi nhầm là giá trị nguồn.
         typed_df = typed_df.withColumn("Revenue", lit(None).cast("double"))
     if "Profit" not in typed_df.columns:
         typed_df = typed_df.withColumn(
@@ -221,7 +221,7 @@ def clean_and_enrich_silver(
     else:
         typed_df = typed_df.withColumn("Operation", trim(col("Operation")).alias("Operation"))
 
-    # Cùng line + cùng timestamp nhưng khác record hash là source conflict. Không
+    # Cùng line và cùng timestamp nhưng khác record hash là xung đột nguồn. Không
     # được chọn ngẫu nhiên một phiên bản vì sẽ làm mất auditability của event.
     if "_record_hash" not in typed_df.columns:
         hash_expr = concat_ws(
@@ -309,7 +309,7 @@ def clean_and_enrich_silver(
     )
 
     # coalesce(..., false) rất quan trọng: trong Spark, filter(NULL) loại dòng khỏi
-    # cả valid lẫn invalid, làm sai công thức raw = valid + rejected + duplicate.
+    # cả dòng hợp lệ lẫn dòng lỗi, làm sai công thức raw = valid + rejected + duplicate.
     if "Order_Line_ID" not in typed_df.columns:
         line_id_present = lit(False)
     else:

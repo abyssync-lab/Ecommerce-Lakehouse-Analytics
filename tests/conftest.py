@@ -18,7 +18,7 @@ os.environ.setdefault("HADOOP_USER_NAME", "hadoop")
 
 @pytest.fixture(scope="session")
 def spark_session():
-    """Khởi tạo một SparkSession có nạp đầy đủ Delta Lake cho integration tests."""
+    """Khởi tạo SparkSession có nạp đầy đủ Delta Lake cho kiểm thử tích hợp."""
     from delta import configure_spark_with_delta_pip
     from pyspark.sql import SparkSession
 
@@ -29,11 +29,13 @@ def spark_session():
         .config("spark.driver.bindAddress", "127.0.0.1")
         .config("spark.driver.port", "0")
         .config("spark.sql.extensions", "io.delta.sql.DeltaSparkSessionExtension")
-        .config("spark.sql.catalog.spark_catalog", "org.apache.spark.sql.delta.catalog.DeltaCatalog")
+        .config(
+            "spark.sql.catalog.spark_catalog", "org.apache.spark.sql.delta.catalog.DeltaCatalog"
+        )
         .config("spark.sql.shuffle.partitions", "2")
         .config("spark.ui.enabled", "false")
         # Delta dùng Ivy để tải JAR. Ép cache vào thư mục temp có quyền ghi để
-        # test chạy ổn định cả trên Windows sandbox và GitHub-hosted runner.
+        # Kiểm thử chạy ổn định cả trên Windows sandbox và runner GitHub.
         .config("spark.jars.ivy", str(Path(tempfile.gettempdir()) / "globalcart-ivy2"))
     )
 

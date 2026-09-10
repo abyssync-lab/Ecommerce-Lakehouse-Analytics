@@ -1,4 +1,4 @@
-"""Sinh báo cáo Business Insights từ Gold snapshot hoặc dữ liệu validation."""
+"""Sinh báo cáo phân tích kinh doanh từ Gold snapshot hoặc dữ liệu validation."""
 
 from __future__ import annotations
 
@@ -154,7 +154,7 @@ def main() -> None:
 
     spark = None
     if args.source == "published":
-        # Import Spark lazy để chế độ --source csv vẫn chạy được trong CI nhẹ.
+        # Nạp Spark theo nhu cầu để chế độ --source csv vẫn chạy được trong CI nhẹ.
         from lakehouse.pipeline import create_spark_session
         from lakehouse.publication import get_current_publication
 
@@ -167,8 +167,8 @@ def main() -> None:
                     "hoặc dùng --source csv cho validation độc lập."
                 )
 
-            # Sales fact có grain order-line, còn Shipping_Cost thuộc order grain.
-            # Join riêng order fact để báo cáo không nhân chi phí vận chuyển theo số line.
+            # Fact bán hàng có grain dòng đơn hàng, còn Shipping_Cost thuộc grain order.
+            # Join riêng fact order để báo cáo không nhân chi phí vận chuyển theo số dòng.
             sales = spark.table("serving.gold_sales_enriched").drop("Publication_Run_ID").toPandas()
             order_costs = (
                 spark.table("serving.fact_order_fulfillment")

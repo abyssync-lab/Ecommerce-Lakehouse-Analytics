@@ -1,4 +1,4 @@
-"""Module xây dựng các bảng Dimension theo mô hình Kimball Star Schema."""
+"""Mô-đun xây dựng các bảng Dimension theo mô hình Kimball Star Schema."""
 
 from __future__ import annotations
 
@@ -102,7 +102,7 @@ def build_dim_customer_scd2(clean_df: Any) -> Any:
     theo thứ tự thời gian bằng lag(), đánh dấu nhóm trạng thái (change_group), sau đó tính [ValidFrom, ValidTo).
     """
     # Với event v2, lịch sử customer phải dùng Source_Updated_At thay vì chỉ dùng
-    # Order_Date. Nhờ vậy hai thay đổi trong cùng một ngày vẫn tạo đúng version.
+    # Order_Date. Nhờ vậy hai thay đổi trong cùng một ngày vẫn tạo đúng phiên bản.
     uses_event_timestamp = "Source_Updated_At" in clean_df.columns
     event_at = (
         to_timestamp(col("Source_Updated_At"))
@@ -145,7 +145,7 @@ def build_dim_customer_scd2(clean_df: Any) -> Any:
         order_cols.append("_record_hash")
     w_order = Window.partitionBy("Customer_ID").orderBy(*order_cols)
 
-    # Null-safe comparison rất quan trọng: hai version có cùng attribute NULL không
+    # So sánh an toàn với NULL rất quan trọng: hai phiên bản có cùng thuộc tính NULL không
     # được bị coi là hai thay đổi khác nhau.
     prev_gender = lag("Customer_Gender", 1).over(w_order)
     prev_segment = lag("Customer_Segment", 1).over(w_order)

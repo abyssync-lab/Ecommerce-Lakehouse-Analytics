@@ -1,4 +1,4 @@
-"""Module orchestrate toàn bộ Data Lakehouse Pipeline (Bronze -> Silver -> Gold)."""
+"""Mô-đun điều phối toàn bộ luồng Data Lakehouse (Bronze -> Silver -> Gold)."""
 
 from __future__ import annotations
 
@@ -206,7 +206,7 @@ def run_pipeline(
 
     try:
         # Bootstrap cũng phải replay-safe. Chỉ môi trường demo/reset mới được phép
-        # Một source hash đã publish thì run bình thường không được nạp lại.
+        # Một source hash đã công bố thì lượt chạy bình thường không được nạp lại.
         if registry.is_batch_processed(source_hash):
             previous = registry.find_by_source_hash(source_hash)
             LOGGER.warning(
@@ -295,8 +295,8 @@ def run_pipeline(
         save_and_verify_delta(
             clean_df, SETTINGS.silver_delta, "silver.ecommerce_clean", mode="overwrite"
         )
-        # Hai bảng current-state có grain rõ ràng; bảng combined ở trên chỉ
-        # giữ tương thích ngược trong giai đoạn chuyển đổi source code.
+        # Hai bảng trạng thái hiện hành có grain rõ ràng; bảng combined ở trên chỉ
+        # giữ để tương thích trong giai đoạn chuyển đổi mã nguồn.
         silver_orders_current = build_silver_orders_current(clean_df)
         silver_order_lines_current = build_silver_order_lines_current(clean_df)
         current_silver = build_silver_current_events(clean_df)
@@ -592,7 +592,7 @@ def run_incremental_pipeline(
                 contract_version="2.0.0",
                 run_id=run_id,
             )
-            # Bronze chỉ append raw event và metadata; không cập nhật current state ở đây.
+            # Bronze chỉ append event thô và metadata; không cập nhật trạng thái hiện hành ở đây.
             enriched_batch = enrich_with_ingestion_metadata(
                 new_batch_df,
                 batch_id=bid,
@@ -694,7 +694,7 @@ def run_incremental_pipeline(
                 col("source._record_hash") == col("target._target_record_hash")
             )
 
-            # Cùng key và cùng timestamp với current state nhưng khác nội dung là
+                # Cùng key và cùng timestamp với trạng thái hiện hành nhưng khác nội dung là
             # sequence conflict ở cấp lịch sử, không được âm thầm bỏ qua.
             historical_conflict_condition = (
                 target_exists
@@ -756,8 +756,8 @@ def run_incremental_pipeline(
                 ~target_exists & (col("source.Operation") == "DELETE")
             ).count()
             if orphan_delete_rows:
-                # DELETE không có current-state target phải được audit như dữ liệu
-                # lỗi; không được coi là valid event đã merge thành công.
+                # DELETE không có target trạng thái hiện hành phải được audit như dữ liệu
+                # lỗi; không được coi là event hợp lệ đã merge thành công.
                 orphan_deletes = comparison.filter(
                     ~target_exists & (col("source.Operation") == "DELETE")
                 ).select(*[col(f"source.{column}").alias(column) for column in merge_batch.columns])
@@ -824,7 +824,7 @@ def run_incremental_pipeline(
                         "AND source.Operation <> 'DELETE'"
                     )
                 )
-                # Orphan DELETE chỉ là metric/quarantine, không tự tạo current-state row.
+                # DELETE mồ côi chỉ là metric/quarantine, không tự tạo dòng trạng thái hiện hành.
                 .whenNotMatchedInsert(
                     condition="source.Operation <> 'DELETE'",
                     values=insert_assignments,
@@ -860,7 +860,7 @@ def run_incremental_pipeline(
                 silver_inserts, SETTINGS.silver_delta, "silver.ecommerce_clean", mode="append"
             )
         superseded_count = valid_count - merge_batch.count()
-        # Đồng bộ hai current-state table sau khi MERGE line events hoàn tất.
+        # Đồng bộ hai bảng trạng thái hiện hành sau khi MERGE event dòng hoàn tất.
         full_merged_events = spark.read.format("delta").load(silver_path)
         silver_orders_current = build_silver_orders_current(full_merged_events)
         silver_order_lines_current = build_silver_order_lines_current(full_merged_events)
@@ -893,7 +893,7 @@ def run_incremental_pipeline(
         )
         registry.mark_silver_merged(run_id)
 
-        # 4. Refresh Gold core và marts từ current state Silver.
+        # 4. Làm mới Gold core và marts từ Silver trạng thái hiện hành.
         LOGGER.info("--- 4. REFRESH GOLD CORE & MARTS TỪ SILVER (SCD2=%s) ---", effective_scd2)
         full_silver = spark.read.format("delta").load(silver_path)
         active_silver = build_silver_current_events(full_silver)
