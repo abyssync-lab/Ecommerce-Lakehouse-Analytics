@@ -882,6 +882,10 @@ def run_incremental_pipeline(
                 "target.Order_ID = source.Order_ID AND target.Order_Line_ID = source.Order_Line_ID"
             )
             LOGGER.info("Thực thi Delta MERGE INTO Silver với điều kiện: %s", merge_cond)
+            # DELETE chỉ mang khóa, timestamp và metadata. Tách khỏi nhánh UPSERT
+            # để các cột nghiệp vụ rỗng của DELETE không được ghi đè lên current state.
+            delete_batch = merge_batch.filter(col("Operation") == "DELETE")
+            upsert_batch = merge_batch.filter(col("Operation") != "DELETE")
             delete_assignments = {
                 column: f"source.{column}"
                 for column in [
@@ -900,36 +904,34 @@ def run_incremental_pipeline(
                 ]
                 if column in existing_cols and column in merge_batch.columns
             }
-            delete_assignments["Is_Deleted"] = "true"
+            delete_assignments["Is_Deleted"] = lit(True)
             insert_assignments = {
                 column: f"source.{column}"
-                for column in merge_batch.columns
+                for column in upsert_batch.columns
                 if column in existing_cols
             }
-            (
-                silver_delta_table.alias("target")
-                .merge(merge_batch.alias("source"), merge_cond)
-                .whenMatchedUpdate(
-                    condition=(
-                        "source.Source_Updated_At > target.Source_Updated_At "
-                        "AND source.Operation = 'DELETE'"
-                    ),
-                    set=delete_assignments,
-                )
-                # Event UPSERT cũ không được ghi đè event mới.
-                .whenMatchedUpdateAll(
-                    condition=(
-                        "source.Source_Updated_At > target.Source_Updated_At "
-                        "AND source.Operation <> 'DELETE'"
+            if delete_batch.limit(1).count() > 0:
+                (
+                    silver_delta_table.alias("target")
+                    .merge(delete_batch.alias("source"), merge_cond)
+                    .whenMatchedUpdate(
+                        condition="source.Source_Updated_At > target.Source_Updated_At",
+                        set=delete_assignments,
                     )
+                    .execute()
                 )
-                # DELETE mồ côi chỉ là metric/quarantine, không tự tạo dòng trạng thái hiện hành.
-                .whenNotMatchedInsert(
-                    condition="source.Operation <> 'DELETE'",
-                    values=insert_assignments,
+
+            if upsert_batch.limit(1).count() > 0:
+                (
+                    silver_delta_table.alias("target")
+                    .merge(upsert_batch.alias("source"), merge_cond)
+                    # Event UPSERT cũ không được ghi đè event mới.
+                    .whenMatchedUpdateAll(
+                        condition="source.Source_Updated_At > target.Source_Updated_At"
+                    )
+                    .whenNotMatchedInsert(values=insert_assignments)
+                    .execute()
                 )
-                .execute()
-            )
             LOGGER.info("Đã hoàn tất Delta MERGE INTO tầng Silver.")
         else:
             silver_inserts = merge_batch.filter(col("Operation") != "DELETE")
