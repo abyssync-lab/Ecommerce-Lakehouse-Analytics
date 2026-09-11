@@ -1,4 +1,4 @@
-from project_cli import build_parser
+from project_cli import build_parser, main
 
 
 def test_cli_accepts_all_public_commands():
@@ -34,3 +34,10 @@ def test_cli_pipeline_subcommands_and_flags():
     assert args_inc.input == "batch.csv"
     assert args_inc.batch_id == "B001"
     assert args_inc.scd2 is True
+
+
+def test_cli_doctor_command_succeeds(capsys):
+    exit_code = main(["doctor"])
+    assert exit_code == 0
+    captured = capsys.readouterr()
+    assert "BÁO CÁO CHẨN ĐOÁN MÔI TRƯỜNG" in captured.out

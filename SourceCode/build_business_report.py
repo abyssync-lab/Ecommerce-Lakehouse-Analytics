@@ -178,6 +178,8 @@ def main() -> None:
     """Đọc published Gold mặc định; CSV chỉ dùng cho validation độc lập."""
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8")
+    if hasattr(sys.stderr, "reconfigure"):
+        sys.stderr.reconfigure(encoding="utf-8")
 
     parser = argparse.ArgumentParser(description="Tự động sinh báo cáo Business Insights")
     parser.add_argument(
@@ -190,11 +192,26 @@ def main() -> None:
     parser.add_argument("--output", type=Path, default=Path("docs/BUSINESS_INSIGHTS.md"))
     args = parser.parse_args()
 
-    if args.source == "published":
-        dataframe, source_label = load_published_dataframe()
-    else:
-        dataframe = pd.read_csv(args.input)
-        source_label = str(args.input)
+    try:
+        if args.source == "published":
+            dataframe, source_label = load_published_dataframe()
+        else:
+            dataframe = pd.read_csv(args.input)
+            source_label = str(args.input)
+    except ModuleNotFoundError as exc:
+        print(
+            f"LỖI: Nguồn 'published' yêu cầu môi trường có PySpark và Delta Lake ({exc}).",
+            file=sys.stderr,
+        )
+        print(
+            "Gợi ý: Dùng cờ '--source csv' để sinh báo cáo độc lập trực tiếp từ file CSV, ví dụ:\n"
+            "  python SourceCode/build_business_report.py --source csv --input Data/EcommerceSalesDataset.csv",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    except RuntimeError as exc:
+        print(f"LỖI: {exc}", file=sys.stderr)
+        sys.exit(1)
 
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(build_report(dataframe, source_label=source_label), encoding="utf-8")

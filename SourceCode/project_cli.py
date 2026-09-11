@@ -13,6 +13,11 @@ from environment_check import format_environment_report, inspect_environment
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_DATASET = PROJECT_ROOT / "Data" / "EcommerceSalesDataset.csv"
 
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8")
+if hasattr(sys.stderr, "reconfigure"):
+    sys.stderr.reconfigure(encoding="utf-8")
+
 logging.basicConfig(
     level=os.getenv("ECOMMERCE_LOG_LEVEL", "INFO"),
     format="%(asctime)s | %(levelname)s | %(message)s",
@@ -26,11 +31,11 @@ def run_quality_checks() -> int:
     Returns:
         Mã thoát 0 nếu toàn bộ quy trình kiểm tra thành công.
     """
-    from build_business_report import build_report, load_published_dataframe
-    from lakehouse.pipeline import run_pipeline
-    from validate_input import validate_input_file
-
     try:
+        from build_business_report import build_report, load_published_dataframe
+        from lakehouse.pipeline import run_pipeline
+        from validate_input import validate_input_file
+
         LOGGER.info("Kiểm tra hợp lệ file CSV thô đầu vào...")
         validate_input_file(DEFAULT_DATASET)
 
@@ -45,6 +50,13 @@ def run_quality_checks() -> int:
         dataframe, source_label = load_published_dataframe()
         output_path = PROJECT_ROOT / "docs" / "BUSINESS_INSIGHTS.md"
         output_path.write_text(build_report(dataframe, source_label), encoding="utf-8")
+    except ModuleNotFoundError as exc:
+        LOGGER.error(
+            "Lệnh check yêu cầu môi trường có PySpark và Delta Lake (%s). "
+            "Chạy 'python SourceCode/project_cli.py doctor' để kiểm tra.",
+            exc,
+        )
+        return 1
     except Exception:
         LOGGER.exception("Lệnh check thất bại")
         return 1
@@ -65,8 +77,6 @@ def run_reconciliation() -> int:
 
 def run_pipeline_command(args: argparse.Namespace) -> int:
     """Chạy bootstrap hoặc incremental bằng API package, không tạo process con."""
-    from lakehouse.pipeline import run_incremental_from_path, run_pipeline
-
     is_incremental = args.incremental or args.mode == "incremental"
     LOGGER.info(
         "Khởi chạy Spark Lakehouse Pipeline (Mode=%s, SCD2=%s)...",
@@ -75,6 +85,8 @@ def run_pipeline_command(args: argparse.Namespace) -> int:
     )
 
     try:
+        from lakehouse.pipeline import run_incremental_from_path, run_pipeline
+
         if is_incremental:
             result = run_incremental_from_path(
                 input_path=args.input,
@@ -86,6 +98,13 @@ def run_pipeline_command(args: argparse.Namespace) -> int:
             if result.spark is not None:
                 result.spark.stop()
         return 0 if result.status in {"SUCCESS", "SKIPPED"} else 1
+    except ModuleNotFoundError as exc:
+        LOGGER.error(
+            "Lệnh pipeline yêu cầu môi trường có PySpark và Delta Lake (%s). "
+            "Chạy 'python SourceCode/project_cli.py doctor' để kiểm tra.",
+            exc,
+        )
+        return 1
     except Exception:
         LOGGER.exception("Lệnh pipeline thất bại")
         return 1
@@ -93,13 +112,24 @@ def run_pipeline_command(args: argparse.Namespace) -> int:
 
 def run_report_command() -> int:
     """Sinh báo cáo từ Gold snapshot đang được công bố."""
-    from build_business_report import build_report, load_published_dataframe
+    try:
+        from build_business_report import build_report, load_published_dataframe
 
-    dataframe, source_label = load_published_dataframe()
-    output_path = PROJECT_ROOT / "docs" / "BUSINESS_INSIGHTS.md"
-    output_path.write_text(build_report(dataframe, source_label), encoding="utf-8")
-    LOGGER.info("Đã tạo báo cáo: %s", output_path)
-    return 0
+        dataframe, source_label = load_published_dataframe()
+        output_path = PROJECT_ROOT / "docs" / "BUSINESS_INSIGHTS.md"
+        output_path.write_text(build_report(dataframe, source_label), encoding="utf-8")
+        LOGGER.info("Đã tạo báo cáo: %s", output_path)
+        return 0
+    except ModuleNotFoundError as exc:
+        LOGGER.error(
+            "Lệnh report yêu cầu môi trường có PySpark và Delta Lake (%s). "
+            "Chạy 'python SourceCode/project_cli.py doctor' để kiểm tra.",
+            exc,
+        )
+        return 1
+    except RuntimeError as exc:
+        LOGGER.error("Không thể tạo báo cáo: %s", exc)
+        return 1
 
 
 def build_parser() -> argparse.ArgumentParser:

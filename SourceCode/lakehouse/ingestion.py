@@ -11,19 +11,28 @@ from typing import Any
 from urllib.parse import unquote, urlparse
 
 from config import PIPELINE_VERSION, SETTINGS
-from pyspark.sql.functions import (
-    col,
-    current_timestamp,
-    lit,
-    monotonically_increasing_id,
-    sha2,
-    struct,
-    to_json,
-)
+
+try:
+    from pyspark.sql.functions import (
+        col,
+        current_timestamp,
+        lit,
+        monotonically_increasing_id,
+        sha2,
+        struct,
+        to_json,
+    )
+except ImportError:
+    col = current_timestamp = lit = monotonically_increasing_id = sha2 = struct = to_json = None
 
 from .contracts.loader import load_contract_for_columns
-from .file_manifest import FileManifest
-from .registry import BatchRegistry
+
+try:
+    from .file_manifest import FileManifest
+    from .registry import BatchRegistry
+except ImportError:
+    FileManifest = None
+    BatchRegistry = None
 
 LOGGER = logging.getLogger(__name__)
 

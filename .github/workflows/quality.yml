@@ -36,20 +36,7 @@ jobs:
       - name: Validate YAML contracts
         run: python scripts/validate_contracts.py
       - name: Run Python-only tests
-        run: >-
-          python -m pytest -q
-          tests/test_advanced_analytics.py
-          tests/test_analytics_contract.py
-          tests/test_business_metrics.py
-          tests/test_config.py
-          tests/test_data_quality.py
-          tests/test_edge_cases.py
-          tests/test_environment_check.py
-          tests/test_project_cli.py
-          tests/test_pipeline_invariants.py::test_partial_incremental_shape_fails_before_bronze
-          tests/test_pipeline_invariants.py::test_calculate_source_hash_idempotency
-          tests/test_pipeline_invariants.py::test_source_hash_and_size_accept_file_uri
-          tests/test_pipeline_invariants.py::test_pipeline_run_result_dataclass_contract
+        run: python -m pytest -q -m "not spark"
 
   spark-integration:
     name: Spark and Delta integration

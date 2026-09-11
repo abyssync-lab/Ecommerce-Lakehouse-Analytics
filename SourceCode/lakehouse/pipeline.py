@@ -7,14 +7,19 @@ import os
 import sys
 import tempfile
 import uuid
-from dataclasses import dataclass, field
 from typing import Any
 
 # Tôn trọng môi trường do CI cung cấp; local dùng đúng Python đang chạy.
 os.environ.setdefault("PYSPARK_PYTHON", sys.executable)
 os.environ.setdefault("PYSPARK_DRIVER_PYTHON", sys.executable)
 
-from config import PIPELINE_VERSION, SETTINGS, PipelineConfig, auto_set_spark_home_env
+from config import (
+    PIPELINE_VERSION,
+    SETTINGS,
+    PipelineConfig,
+    PipelineRunResult,
+    auto_set_spark_home_env,
+)
 
 auto_set_spark_home_env()
 
@@ -102,24 +107,6 @@ def _customer_history_source(spark: SparkSession, fallback_df: Any, use_scd2: bo
     return history
 
 
-@dataclass
-class PipelineRunResult:
-    """Kết quả hoàn chỉnh của một lượt thực thi Pipeline Lakehouse."""
-
-    run_id: str
-    batch_id: str
-    status: str  # "SUCCESS", "FAILED", "SKIPPED"
-    bronze_rows: int
-    silver_rows: int
-    quarantine_rows: int
-    duplicate_rows: int
-    reconciliation_passed: bool
-    reconciliation_report: dict[str, Any] = field(default_factory=dict)
-    published_run_id: str | None = None
-    error_message: str | None = None
-    spark: SparkSession | None = None
-
-
 class ReconciliationError(Exception):
     """Ngoại lệ phát sinh khi Gold không vượt qua các kiểm tra đối soát."""
 
@@ -163,6 +150,99 @@ def create_spark_session() -> SparkSession:
 
     # Dùng catalog dùng chung để stable view serving tồn tại giữa các process.
     return configure_spark_with_delta_pip(builder.enableHiveSupport()).getOrCreate()
+
+
+def _build_and_publish_gold(
+    spark: SparkSession,
+    active_silver: Any,
+    silver_orders_current: Any,
+    silver_order_lines_current: Any,
+    effective_scd2: bool,
+    customer_history_source: Any,
+    run_id: str,
+    registry: BatchRegistry,
+    raw_count: int,
+    duplicate_count: int,
+    invalid_count: int,
+    valid_count: int,
+    published_version: str = "1",
+) -> dict[str, Any]:
+    """Dựng Star Schema, Semantic Marts, chạy đối soát và publish serving snapshot."""
+    LOGGER.info("--- GOLD LAYER - STAR SCHEMA (SCD2=%s) ---", effective_scd2)
+    dimensions = build_all_dimensions(
+        spark,
+        active_silver,
+        use_scd2=effective_scd2,
+        customer_history_df=customer_history_source,
+    )
+    fact_sales = build_fact_sales(active_silver, dimensions)
+    fact_order_fulfillment = build_fact_order_fulfillment(
+        silver_orders_current,
+        silver_order_lines_current,
+        dimensions,
+    )
+    persist_gold_staging(
+        spark,
+        {
+            **dimensions,
+            "fact_sales_line": fact_sales,
+            "fact_order_fulfillment": fact_order_fulfillment,
+        },
+        run_id,
+        "gold_star",
+    )
+
+    LOGGER.info("--- GOLD LAYER - CANONICAL SEMANTIC BASE & MARTS ---")
+    sales_enriched = build_sales_enriched(fact_sales, dimensions)
+    persist_gold_staging(
+        spark,
+        {"gold_sales_enriched": sales_enriched},
+        run_id,
+        "gold_semantic",
+    )
+    gold_marts = build_gold_marts(sales_enriched, fact_order_fulfillment)
+    persist_gold_staging(spark, gold_marts, run_id, "gold_mart")
+    registry.update_status(run_id, "GOLD_BUILT", gold_run_id=run_id)
+
+    LOGGER.info("--- GOLD RECONCILIATION ---")
+    recon_report = run_full_reconciliation(
+        clean_df=active_silver,
+        fact_sales=fact_sales,
+        mart_overview=gold_marts["mart_executive_daily"],
+        dim_customer=dimensions["dim_customer"],
+        raw_count=raw_count,
+        duplicate_count=duplicate_count,
+        invalid_count=invalid_count,
+        run_id=run_id,
+        valid_count=valid_count,
+        silver_orders_current=silver_orders_current,
+        silver_order_lines_current=silver_order_lines_current,
+        fact_order_fulfillment=fact_order_fulfillment,
+    )
+    if recon_report.get("overall_status") != "PASS":
+        raise ReconciliationError(f"Gold reconciliation không đạt PASS: {recon_report}")
+
+    registry.mark_reconciled(run_id)
+    publish_gold_run(
+        spark,
+        {
+            **dimensions,
+            "fact_sales_line": fact_sales,
+            "fact_order_fulfillment": fact_order_fulfillment,
+            "gold_sales_enriched": sales_enriched,
+            **gold_marts,
+        },
+        run_id,
+    )
+    try:
+        registry.mark_published(run_id, gold_run_id=run_id, published_version=published_version)
+    except Exception as finalization_error:
+        # Snapshot đã đổi nhưng metadata chưa ghi được: giữ trạng thái riêng
+        # để retry không đánh dấu FAILED sai một run đã được Power BI nhìn thấy.
+        registry.mark_publish_metadata_pending(run_id, finalization_error)
+        raise
+
+    return recon_report
 
 
 def run_pipeline(
@@ -331,81 +411,22 @@ def run_pipeline(
         )
         registry.mark_silver_merged(run_id)
 
-        # 3. Gold: dựng star schema và semantic marts từ cùng một Silver snapshot.
-        LOGGER.info("--- 4. GOLD LAYER - STAR SCHEMA (SCD2=%s) ---", effective_scd2)
-        dimensions = build_all_dimensions(
-            spark,
-            current_silver,
-            use_scd2=effective_scd2,
-            customer_history_df=_customer_history_source(spark, clean_df, effective_scd2),
-        )
-        fact_sales = build_fact_sales(current_silver, dimensions)
-        fact_order_fulfillment = build_fact_order_fulfillment(
-            silver_orders_current,
-            silver_order_lines_current,
-            dimensions,
-        )
-        persist_gold_staging(
-            spark,
-            {
-                **dimensions,
-                "fact_sales_line": fact_sales,
-                "fact_order_fulfillment": fact_order_fulfillment,
-            },
-            run_id,
-            "gold_star",
-        )
-
-        LOGGER.info("--- 5. GOLD LAYER - CANONICAL SEMANTIC BASE & MARTS ---")
-        sales_enriched = build_sales_enriched(fact_sales, dimensions)
-        persist_gold_staging(
-            spark,
-            {"gold_sales_enriched": sales_enriched},
-            run_id,
-            "gold_semantic",
-        )
-        gold_marts = build_gold_marts(sales_enriched, fact_order_fulfillment)
-        persist_gold_staging(spark, gold_marts, run_id, "gold_mart")
-        registry.update_status(run_id, "GOLD_BUILT", gold_run_id=run_id)
-
-        # 4. Chỉ publish sau khi Gold reconciliation đạt PASS.
-        LOGGER.info("--- 6. GOLD RECONCILIATION ---")
-        recon_report = run_full_reconciliation(
-            clean_df=current_silver,
-            fact_sales=fact_sales,
-            mart_overview=gold_marts["mart_executive_daily"],
-            dim_customer=dimensions["dim_customer"],
+        # 3. Gold: dựng star schema, semantic marts, đối soát và publish.
+        recon_report = _build_and_publish_gold(
+            spark=spark,
+            active_silver=current_silver,
+            silver_orders_current=silver_orders_current,
+            silver_order_lines_current=silver_order_lines_current,
+            effective_scd2=effective_scd2,
+            customer_history_source=_customer_history_source(spark, clean_df, effective_scd2),
+            run_id=run_id,
+            registry=registry,
             raw_count=bronze_rows,
             duplicate_count=duplicate_rows,
             invalid_count=quarantine_rows,
-            run_id=run_id,
             valid_count=silver_rows,
-            silver_orders_current=silver_orders_current,
-            silver_order_lines_current=silver_order_lines_current,
-            fact_order_fulfillment=fact_order_fulfillment,
+            published_version="1",
         )
-        if recon_report.get("overall_status") != "PASS":
-            raise ReconciliationError(f"Gold reconciliation không đạt PASS: {recon_report}")
-
-        registry.mark_reconciled(run_id)
-        publish_gold_run(
-            spark,
-            {
-                **dimensions,
-                "fact_sales_line": fact_sales,
-                "fact_order_fulfillment": fact_order_fulfillment,
-                "gold_sales_enriched": sales_enriched,
-                **gold_marts,
-            },
-            run_id,
-        )
-        try:
-            registry.mark_published(run_id, gold_run_id=run_id, published_version="1")
-        except Exception as finalization_error:
-            # Snapshot đã đổi nhưng metadata chưa ghi được: giữ trạng thái riêng
-            # để retry không đánh dấu FAILED sai một run đã được Power BI nhìn thấy.
-            registry.mark_publish_metadata_pending(run_id, finalization_error)
-            raise
 
         LOGGER.info("HOÀN THÀNH PIPELINE: Gold snapshot đã được publish.")
         pipeline_succeeded = True
@@ -995,82 +1016,23 @@ def run_incremental_pipeline(
         registry.mark_silver_merged(run_id)
 
         # 4. Làm mới Gold core và marts từ Silver trạng thái hiện hành.
-        LOGGER.info("--- 4. REFRESH GOLD CORE & MARTS TỪ SILVER (SCD2=%s) ---", effective_scd2)
         full_silver = spark.read.format("delta").load(silver_path)
         active_silver = build_silver_current_events(full_silver)
-        dimensions = build_all_dimensions(
-            spark,
-            active_silver,
-            use_scd2=effective_scd2,
-            customer_history_df=_customer_history_source(spark, active_silver, effective_scd2),
-        )
-        fact_sales = build_fact_sales(active_silver, dimensions)
-        fact_order_fulfillment = build_fact_order_fulfillment(
-            silver_orders_current,
-            silver_order_lines_current,
-            dimensions,
-        )
-        persist_gold_staging(
-            spark,
-            {
-                **dimensions,
-                "fact_sales_line": fact_sales,
-                "fact_order_fulfillment": fact_order_fulfillment,
-            },
-            run_id,
-            "gold_star",
-        )
-
-        sales_enriched = build_sales_enriched(fact_sales, dimensions)
-        persist_gold_staging(
-            spark,
-            {"gold_sales_enriched": sales_enriched},
-            run_id,
-            "gold_semantic",
-        )
-
-        gold_marts = build_gold_marts(sales_enriched, fact_order_fulfillment)
-        persist_gold_staging(spark, gold_marts, run_id, "gold_mart")
-        registry.update_status(run_id, "GOLD_BUILT", gold_run_id=run_id)
-
-        # 5. Đối soát sau khi mọi Gold output đã được ghi.
-        recon_report = run_full_reconciliation(
-            clean_df=active_silver,
-            fact_sales=fact_sales,
-            mart_overview=gold_marts["mart_executive_daily"],
-            dim_customer=dimensions["dim_customer"],
+        recon_report = _build_and_publish_gold(
+            spark=spark,
+            active_silver=active_silver,
+            silver_orders_current=silver_orders_current,
+            silver_order_lines_current=silver_order_lines_current,
+            effective_scd2=effective_scd2,
+            customer_history_source=_customer_history_source(spark, active_silver, effective_scd2),
+            run_id=run_id,
+            registry=registry,
             raw_count=raw_count,
             duplicate_count=batch_duplicate_count,
             invalid_count=batch_rejected_count,
-            run_id=run_id,
             valid_count=valid_count,
-            silver_orders_current=silver_orders_current,
-            silver_order_lines_current=silver_order_lines_current,
-            fact_order_fulfillment=fact_order_fulfillment,
+            published_version="2",
         )
-
-        if recon_report.get("overall_status") != "PASS":
-            raise ReconciliationError(
-                f"Incremental Gold reconciliation không đạt PASS: {recon_report}"
-            )
-
-        registry.mark_reconciled(run_id)
-        publish_gold_run(
-            spark,
-            {
-                **dimensions,
-                "fact_sales_line": fact_sales,
-                "fact_order_fulfillment": fact_order_fulfillment,
-                "gold_sales_enriched": sales_enriched,
-                **gold_marts,
-            },
-            run_id,
-        )
-        try:
-            registry.mark_published(run_id, gold_run_id=run_id, published_version="2")
-        except Exception as finalization_error:
-            registry.mark_publish_metadata_pending(run_id, finalization_error)
-            raise
 
         LOGGER.info("--- THÀNH CÔNG: INCREMENTAL GOLD SNAPSHOT ĐÃ ĐƯỢC PUBLISH ---")
         return PipelineRunResult(

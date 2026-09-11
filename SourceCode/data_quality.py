@@ -8,11 +8,9 @@ from __future__ import annotations
 
 from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Literal
+from typing import Literal
 
-if TYPE_CHECKING:
-    import pandas as pd
-
+import pandas as pd
 from lakehouse.contracts.loader import load_contract
 
 _CONTRACT = load_contract()
@@ -218,8 +216,6 @@ def validate_gold_values(df: pd.DataFrame) -> QualityReportSummary:
             reject_rate_percent=100.0,
             results=[column_result],
         )
-
-    import pandas as pd
 
     parsed_dates = pd.to_datetime(df["Order_Date"], errors="coerce")
     required_nulls = df[list(GOLD_COLUMNS)].isna().any(axis=1)

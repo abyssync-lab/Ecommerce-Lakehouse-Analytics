@@ -5,6 +5,11 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
+import pytest
+
+pytest.importorskip("pyspark")
+pytestmark = pytest.mark.spark
+
 # Thêm SourceCode vào sys.path.
 SOURCE_DIR = Path(__file__).resolve().parents[1] / "SourceCode"
 if str(SOURCE_DIR) not in sys.path:

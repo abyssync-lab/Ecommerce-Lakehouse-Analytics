@@ -1,6 +1,9 @@
 """Kiểm tra snapshot current-state trước khi dựng Gold."""
 
-from __future__ import annotations
+import pytest
+
+pytest.importorskip("pyspark")
+pytestmark = pytest.mark.spark
 
 from lakehouse.silver import build_silver_current_events, clean_and_enrich_silver
 from pyspark.sql.functions import col

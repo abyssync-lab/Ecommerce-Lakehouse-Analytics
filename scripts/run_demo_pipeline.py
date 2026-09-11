@@ -26,6 +26,11 @@ def _require(condition: bool, message: str) -> None:
 
 def main() -> int:
     """Chạy hai batch độc lập rồi chạy lại batch thứ hai bằng tên file khác."""
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8")
+    if hasattr(sys.stderr, "reconfigure"):
+        sys.stderr.reconfigure(encoding="utf-8")
+
     batch_one_path = FIXTURE_DIR / "order_events_batch_001.csv"
     batch_two_path = FIXTURE_DIR / "order_events_batch_002.csv"
     if not batch_one_path.is_file() or not batch_two_path.is_file():
@@ -43,8 +48,16 @@ def main() -> int:
 
         from config import SETTINGS
         from lakehouse.ingestion import calculate_source_hash
-        from lakehouse.pipeline import create_spark_session, run_incremental_pipeline
         from lakehouse.storage import resolve_path
+
+        try:
+            from lakehouse.pipeline import create_spark_session, run_incremental_pipeline
+        except ModuleNotFoundError as exc:
+            print(
+                f"LỖI: scripts/run_demo_pipeline.py yêu cầu môi trường có PySpark và Java. ({exc})",
+                file=sys.stderr,
+            )
+            return 1
 
         spark = create_spark_session()
         try:

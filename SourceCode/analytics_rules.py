@@ -9,12 +9,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
-from typing import TYPE_CHECKING
 
+import pandas as pd
 import yaml
-
-if TYPE_CHECKING:
-    import pandas as pd
 
 
 @dataclass(frozen=True)
@@ -153,8 +150,6 @@ def calculate_rfm_pandas(
     Returns:
         DataFrame chứa thông tin Customer_ID, Last_Purchase, Frequency, Monetary, Recency, RFM_Segment.
     """
-    import pandas as pd
-
     if dataframe.empty:
         raise ValueError("Không thể phân tích RFM với dữ liệu rỗng")
 

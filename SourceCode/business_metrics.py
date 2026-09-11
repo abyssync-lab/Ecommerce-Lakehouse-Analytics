@@ -6,12 +6,9 @@ Module này dùng Pandas cho kiểm thử đơn vị và kiểm tra chéo kết 
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
-from typing import TYPE_CHECKING
 
+import pandas as pd
 from analytics_rules import calculate_abc_pandas, calculate_rfm_pandas
-
-if TYPE_CHECKING:
-    import pandas as pd
 
 
 @dataclass(frozen=True)

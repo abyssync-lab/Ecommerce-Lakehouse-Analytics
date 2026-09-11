@@ -16,6 +16,11 @@ os.environ.setdefault("SPARK_LOCAL_HOSTNAME", "localhost")
 os.environ.setdefault("HADOOP_USER_NAME", "hadoop")
 
 
+def pytest_configure(config):
+    """Đăng ký marker tùy chỉnh cho bộ kiểm thử."""
+    config.addinivalue_line("markers", "spark: kiểm thử tích hợp yêu cầu PySpark và Delta Lake")
+
+
 @pytest.fixture(scope="session")
 def spark_session():
     """Khởi tạo SparkSession có nạp đầy đủ Delta Lake cho kiểm thử tích hợp."""

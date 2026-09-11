@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import importlib.util
 import shutil
+import sys
 from dataclasses import dataclass
 
 
@@ -96,3 +97,9 @@ def format_environment_report(statuses: list[DependencyStatus]) -> str:
             f"[{marker:<5}] {status.name:<12} | {status.required_for:<28} | {status.detail}"
         )
     return "\n".join(lines)
+
+
+if __name__ == "__main__":
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8")
+    print(format_environment_report(inspect_environment()))

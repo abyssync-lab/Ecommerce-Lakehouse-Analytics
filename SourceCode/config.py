@@ -7,8 +7,9 @@ chỉ dùng để đổi thư mục dữ liệu, file nguồn và một vài tu�
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 PIPELINE_VERSION = "1.1.0"
 
@@ -125,6 +126,24 @@ class PipelineConfig:
     run_id: str | None = None
     input_path: str | None = None
     quarantine_path: str | None = None
+
+
+@dataclass
+class PipelineRunResult:
+    """Kết quả hoàn chỉnh của một lượt thực thi Pipeline Lakehouse."""
+
+    run_id: str
+    batch_id: str
+    status: str  # "SUCCESS", "FAILED", "SKIPPED"
+    bronze_rows: int
+    silver_rows: int
+    quarantine_rows: int
+    duplicate_rows: int
+    reconciliation_passed: bool
+    reconciliation_report: dict[str, Any] = field(default_factory=dict)
+    published_run_id: str | None = None
+    error_message: str | None = None
+    spark: Any = None
 
 
 SETTINGS = Settings()
