@@ -20,9 +20,9 @@ jobs:
     timeout-minutes: 10
     steps:
       - name: Checkout source
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: "3.11"
           cache: pip
@@ -59,19 +59,21 @@ jobs:
     env:
       SPARK_LOCAL_IP: 127.0.0.1
       SPARK_LOCAL_HOSTNAME: localhost
+      HADOOP_USER_NAME: hadoop
+      SPARK_IVY_DIR: ${{ runner.temp }}/globalcart-ivy2
       PYSPARK_PYTHON: python
       PYSPARK_DRIVER_PYTHON: python
     steps:
       - name: Checkout source
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: "3.11"
           cache: pip
           cache-dependency-path: pyproject.toml
       - name: Set up Java for Spark
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: "17"

@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import os
 import sys
+import tempfile
 import uuid
 from dataclasses import dataclass, field
 from typing import Any
@@ -136,6 +137,15 @@ def create_spark_session() -> SparkSession:
         .config(
             "spark.sql.catalog.spark_catalog",
             "org.apache.spark.sql.delta.catalog.DeltaCatalog",
+        )
+        .config("spark.sql.shuffle.partitions", os.getenv("SPARK_SHUFFLE_PARTITIONS", "2"))
+        .config("spark.ui.enabled", "false")
+        .config(
+            "spark.jars.ivy",
+            os.getenv(
+                "SPARK_IVY_DIR",
+                str(os.path.join(tempfile.gettempdir(), "globalcart-ivy2")),
+            ),
         )
     )
     # Điểm vào được gọi trực tiếp bằng `python`, vì vậy local/CI cần master

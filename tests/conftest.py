@@ -36,7 +36,10 @@ def spark_session():
         .config("spark.ui.enabled", "false")
         # Delta dùng Ivy để tải JAR. Ép cache vào thư mục temp có quyền ghi để
         # Kiểm thử chạy ổn định cả trên Windows sandbox và runner GitHub.
-        .config("spark.jars.ivy", str(Path(tempfile.gettempdir()) / "globalcart-ivy2"))
+        .config(
+            "spark.jars.ivy",
+            os.getenv("SPARK_IVY_DIR", str(Path(tempfile.gettempdir()) / "globalcart-ivy2")),
+        )
     )
 
     # Hàm này vừa đăng ký Delta extensions vừa thêm đúng JAR tương thích với PySpark.

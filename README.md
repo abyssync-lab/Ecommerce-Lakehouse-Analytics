@@ -261,6 +261,8 @@ python -m pip install -e ".[dev]"
 $env:ECOMMERCE_INPUT_CSV = "Data/EcommerceSalesDataset.csv"
 $env:ECOMMERCE_LOCAL_STORAGE_BASE = "Output/lakehouse"
 $env:SPARK_LOCAL_IP = "127.0.0.1"
+# Tùy chọn: đặt cache JAR Delta ở thư mục có quyền ghi.
+$env:SPARK_IVY_DIR = "$env:TEMP\globalcart-ivy2"
 ```
 
 ### Validate và bootstrap

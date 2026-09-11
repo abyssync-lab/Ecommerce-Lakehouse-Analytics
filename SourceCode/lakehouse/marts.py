@@ -53,13 +53,13 @@ def _ensure_gold_measures(dataframe: Any) -> Any:
                 "Net_Line_Amount",
                 col("Quantity") * col("Unit_Price") * (lit(1.0) - col("Discount")),
             )
+    if "Cost_Amount" not in result.columns:
+        result = result.withColumn("Cost_Amount", col("Quantity") * col("Cost"))
     if "Gross_Profit" not in result.columns:
         if "Profit" in result.columns:
             result = result.withColumn("Gross_Profit", col("Profit"))
         else:
             result = result.withColumn("Gross_Profit", col("Net_Line_Amount") - col("Cost_Amount"))
-    if "Cost_Amount" not in result.columns:
-        result = result.withColumn("Cost_Amount", col("Quantity") * col("Cost"))
     if "Gross_Amount" not in result.columns:
         result = result.withColumn("Gross_Amount", col("Quantity") * col("Unit_Price"))
     if "Discount_Amount" not in result.columns:
@@ -73,7 +73,8 @@ def _load_shipping_sla() -> tuple[int, dict[str, int]]:
     data = yaml.safe_load(SHIPPING_SLA_PATH.read_text(encoding="utf-8")) or {}
     default_days = int(data.get("default_sla_days", 7))
     method_days = {
-        str(method): int(days) for method, days in (data.get("shipping_methods", {}) or {}).items()
+        str(method): int(days)
+        for method, days in (data.get("by_shipping_method", {}) or {}).items()
     }
     return default_days, method_days
 
@@ -118,6 +119,25 @@ def _filter_policy_rows(clean_df: Any, metric_name: str) -> Any:
     """Lọc đúng các trạng thái được phép của một metric Gold."""
     statuses = load_business_policy()[metric_name]
     return clean_df.filter(col("Order_Status").isin(statuses))
+
+
+def _optional_average(dataframe: Any, column_name: str) -> Any:
+    """Tạo phép trung bình cho cột tùy chọn mà không làm vỡ semantic base.
+
+    Shipping_Days và Shipping_Cost là thuộc tính cấp order, nên không nằm trong
+    fact_sales_line. Mart tương thích vẫn giữ hai chỉ số cũ nhưng trả NULL khi
+    semantic base chỉ chứa line fact chuẩn hóa.
+    """
+    if column_name in dataframe.columns:
+        return round(avg(column_name), 2)
+    return lit(None).cast("double")
+
+
+def _optional_first(dataframe: Any, column_name: str) -> Any:
+    """Lấy giá trị đại diện của cột cấp order nếu semantic base có cột đó."""
+    if column_name in dataframe.columns:
+        return first(column_name, ignorenulls=True)
+    return lit(None).cast("double")
 
 
 def build_fact_sales(
@@ -391,7 +411,7 @@ def build_mart_order_summary(clean_df: Any) -> Any:
             round(spark_sum("Net_Line_Amount"), 2).alias("Order_Total_Revenue"),
             round(spark_sum("Cost_Amount"), 2).alias("Order_Total_Cost"),
             round(spark_sum("Gross_Profit"), 2).alias("Order_Total_Profit"),
-            first("Shipping_Cost", ignorenulls=True).alias("Order_Shipping_Cost"),
+            _optional_first(clean_df, "Shipping_Cost").alias("Order_Shipping_Cost"),
         )
         .orderBy(col("Order_Total_Revenue").desc())
     )
@@ -598,8 +618,8 @@ def build_all_marts(clean_df: Any) -> dict[str, Any]:
         round((spark_sum("Gross_Profit") / spark_sum("Net_Line_Amount")) * 100, 2).alias(
             "Average_Profit_Margin"
         ),
-        round(avg("Shipping_Days"), 2).alias("Average_Shipping_Days"),
-        round(avg("Shipping_Cost"), 2).alias("Average_Shipping_Cost"),
+        _optional_average(clean_df, "Shipping_Days").alias("Average_Shipping_Days"),
+        _optional_average(clean_df, "Shipping_Cost").alias("Average_Shipping_Cost"),
     )
 
     return {

@@ -25,6 +25,8 @@ Local storage mặc định:
 ~~~powershell
 $env:SPARK_LOCAL_IP = "127.0.0.1"
 $env:PYSPARK_PYTHON = "python"
+# Tùy chọn: cache JAR Delta ở thư mục local có quyền ghi.
+$env:SPARK_IVY_DIR = "$env:TEMP\globalcart-ivy2"
 ~~~
 
 Storage path được resolve bởi Settings. Không hard-code local path trong các
