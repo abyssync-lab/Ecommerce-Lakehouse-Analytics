@@ -139,7 +139,7 @@ def build_report(dataframe: pd.DataFrame, source_label: str = "published Gold se
 def load_published_dataframe() -> tuple[pd.DataFrame, str]:
     """Đọc dữ liệu từ Gold snapshot đang được publication pointer trỏ tới."""
     from lakehouse.pipeline import create_spark_session
-    from lakehouse.publication import get_current_publication
+    from lakehouse.publication import get_current_publication, read_published_table
 
     spark = create_spark_session()
     try:
@@ -152,9 +152,13 @@ def load_published_dataframe() -> tuple[pd.DataFrame, str]:
 
         # Fact bán hàng có grain dòng đơn hàng, còn Shipping_Cost thuộc grain order.
         # Join riêng fact order để báo cáo không nhân chi phí vận chuyển theo số dòng.
-        sales = spark.table("serving.gold_sales_enriched").drop("Publication_Run_ID").toPandas()
+        sales = (
+            read_published_table(spark, "gold_sales_enriched", current_run_id)
+            .drop("Publication_Run_ID")
+            .toPandas()
+        )
         order_costs = (
-            spark.table("serving.fact_order_fulfillment")
+            read_published_table(spark, "fact_order_fulfillment", current_run_id)
             .select("Order_ID", "Shipping_Cost")
             .dropDuplicates(["Order_ID"])
             .toPandas()

@@ -141,6 +141,10 @@ def create_spark_session() -> SparkSession:
         .config("spark.sql.shuffle.partitions", os.getenv("SPARK_SHUFFLE_PARTITIONS", "2"))
         .config("spark.ui.enabled", "false")
         .config(
+            "spark.sql.warehouse.dir",
+            SETTINGS.get_storage_path("/spark-warehouse"),
+        )
+        .config(
             "spark.jars.ivy",
             os.getenv(
                 "SPARK_IVY_DIR",
@@ -157,7 +161,8 @@ def create_spark_session() -> SparkSession:
     if driver_bind:
         builder = builder.config("spark.driver.bindAddress", driver_bind)
 
-    return configure_spark_with_delta_pip(builder).getOrCreate()
+    # Dùng catalog dùng chung để stable view serving tồn tại giữa các process.
+    return configure_spark_with_delta_pip(builder.enableHiveSupport()).getOrCreate()
 
 
 def run_pipeline(

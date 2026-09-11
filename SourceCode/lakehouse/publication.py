@@ -145,3 +145,26 @@ def get_current_publication(spark: Any) -> str | None:
         .collect()
     )
     return rows[0]["current_run_id"] if rows else None
+
+
+def read_published_table(spark: Any, table_name: str, run_id: str | None = None) -> Any:
+    """Đọc trực tiếp serving Delta theo publication pointer hiện hành.
+
+    Stable view được tạo cho Power BI, nhưng catalog mặc định của Spark có thể
+    chỉ sống trong một process. Báo cáo và CLI vì vậy không phụ thuộc vào view
+    đã đăng ký từ process bootstrap trước đó; chúng đọc đúng path serving và
+    lọc theo cùng ``Publication_Run_ID``.
+    """
+    current_run_id = run_id or get_current_publication(spark)
+    if not current_run_id or current_run_id == "__NONE__":
+        raise RuntimeError("Chưa có Gold publication khả dụng.")
+
+    serving_path = resolve_path(f"{SERVING_BASE}/{table_name}_delta")
+    if not DeltaTable.isDeltaTable(spark, serving_path):
+        raise RuntimeError(f"Serving table chưa tồn tại: {table_name}")
+
+    return (
+        spark.read.format("delta")
+        .load(serving_path)
+        .filter(col("Publication_Run_ID") == current_run_id)
+    )
