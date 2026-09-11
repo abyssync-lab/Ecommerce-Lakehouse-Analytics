@@ -39,7 +39,7 @@ def add_surrogate_key(dataframe: Any, key_name: str, order_cols: list[str]) -> A
 
     Chiến lược khóa (Surrogate Key Strategy):
     `row_number()` thay đổi khi một dimension member mới xuất hiện và có thể làm fact
-    cũ trỏ sang key khác. Hash key giữ nguyên khi rebuild/incremental; bảng mapping
+    cũ trỏ sang khóa khác. Khóa băm giữ nguyên khi dựng lại/nạp tăng dần; bảng mapping
     persistent riêng có thể thay thế sau này nếu cần chống collision tuyệt đối.
     """
     key_expression = xxhash64(*[col(column).cast("string") for column in order_cols])

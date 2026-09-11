@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import argparse
 import sys
 from pathlib import Path
 
@@ -13,14 +14,8 @@ SOURCE_DIR = Path(__file__).resolve().parent
 if str(SOURCE_DIR) not in sys.path:
     sys.path.insert(0, str(SOURCE_DIR))
 
-import argparse
-import uuid
-
 from config import SETTINGS
-from lakehouse.file_manifest import FileManifest
-from lakehouse.ingestion import calculate_source_hash, calculate_source_size, read_raw_csv
-from lakehouse.pipeline import create_spark_session, run_incremental_pipeline, run_pipeline
-from lakehouse.registry import BatchRegistry
+from lakehouse.pipeline import run_incremental_from_path, run_pipeline
 
 
 def main() -> None:
@@ -37,68 +32,16 @@ def main() -> None:
     use_scd2 = args.scd2 if args.scd2 is not None else SETTINGS.use_scd2
 
     if args.incremental:
-        spark = create_spark_session()
-        source_uri = args.input or SETTINGS.get_input_path()
-        source_hash = "hash_unavailable"
-        # Hash phải được tính từ bytes của file trước khi DataFrame đi vào pipeline;
-        # không dùng batch_id làm giả định danh nguồn.
-        try:
-            source_hash = calculate_source_hash(source_uri)
-            new_batch_df = read_raw_csv(spark, args.input)
-        except Exception as exc:
-            # Khi file chưa đọc được, chưa thể có content hash. Dùng sentinel chỉ
-            # cho run FAILED; sentinel này luôn bị loại khỏi idempotency lookup.
-            registry = BatchRegistry(spark)
-            run_id = f"run_{uuid.uuid4().hex[:8]}"
-            batch_id = args.batch_id or f"batch_{source_hash[:8]}"
-            registry.start_run(
-                run_id=run_id,
-                batch_id=batch_id,
-                source_uri=source_uri,
-                source_hash=source_hash,
-                contract_version="2.0.0",
-            )
-            error_code = (
-                "SOURCE_FILE_NOT_FOUND"
-                if isinstance(exc, FileNotFoundError)
-                else "FILE_SCHEMA_MISMATCH"
-            )
-            # File manifest phải ghi cả thất bại trước Bronze để operator biết
-            # nguồn đã được phát hiện nhưng chưa commit và có thể thử lại.
-            manifest = FileManifest(spark)
-            manifest.register_discovered(
-                source_system="ecommerce_csv",
-                source_hash=source_hash,
-                source_uri=source_uri,
-                file_size_bytes=calculate_source_size(source_uri),
-                contract_version="2.0.0",
-                run_id=run_id,
-            )
-            registry.mark_failed(run_id, exc, error_code=error_code)
-            manifest.mark_failed(
-                source_system="ecommerce_csv",
-                source_hash=source_hash,
-                run_id=run_id,
-                error_code=error_code,
-                error_message=str(exc),
-            )
-            spark.stop()
-            raise
-        result = run_incremental_pipeline(
-            new_batch_df,
-            spark=spark,
+        run_incremental_from_path(
+            input_path=args.input,
             batch_id=args.batch_id,
             use_scd2=use_scd2,
-            source_hash=source_hash,
-            source_uri=source_uri,
         )
-        active_spark = result.spark or spark
-    else:
-        result = run_pipeline(input_path=args.input, use_scd2=use_scd2)
-        active_spark = result.spark
+        return
 
-    if active_spark is not None:
-        active_spark.stop()
+    result = run_pipeline(input_path=args.input, use_scd2=use_scd2)
+    if result.spark is not None:
+        result.spark.stop()
 
 
 if __name__ == "__main__":

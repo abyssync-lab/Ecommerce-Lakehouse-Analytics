@@ -25,7 +25,7 @@ def main() -> int:
         raise FileNotFoundError("Thiếu fixture incremental trong tests/fixtures")
 
     # SETTINGS được khởi tạo khi import package; đặt storage cô lập trước đó để
-    # Kiểm thử nhanh không ghi đè Output/lakehouse của người dùng.
+    # kiểm thử nhanh không ghi đè Output/lakehouse của người dùng.
     with TemporaryDirectory(prefix="globalcart_demo_") as storage_dir:
         os.environ["ECOMMERCE_LOCAL_STORAGE_BASE"] = storage_dir
         os.environ.setdefault("SPARK_LOCAL_IP", "127.0.0.1")
@@ -98,7 +98,7 @@ def main() -> int:
             assert order_row.Order_ID == "A001"
             assert order_row.Shipping_Cost == 20.0
 
-            # Sao chép đúng bytes sang tên file khác để chứng minh hash dựa trên nội dung.
+            # Sao chép đúng dãy byte sang tên file khác để chứng minh mã băm dựa trên nội dung.
             replay_path = Path(storage_dir) / "renamed_replay.csv"
             replay_path.write_bytes(batch_two_path.read_bytes())
             replay = run_incremental_pipeline(
@@ -110,7 +110,7 @@ def main() -> int:
             )
             assert replay.status == "SKIPPED"
 
-            print("End-to-end lakehouse smoke test passed.")
+            print("Kiểm thử đầu cuối lakehouse đã đạt.")
             print(f"first={first.run_id} second={second.run_id} replay={replay.status}")
             return 0
         finally:

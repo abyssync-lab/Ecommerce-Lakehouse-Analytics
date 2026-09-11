@@ -1,9 +1,8 @@
-# E-commerce Lakehouse Analytics — Incremental Order & Fulfillment Pipeline
+# Ecommerce Lakehouse Analytics — GlobalCart Order & Fulfillment Platform
 
-End-to-end batch lakehouse xử lý incremental order events từ OMS bằng PySpark +
-Delta Lake. Pipeline tập trung vào content-hash duplicate protection, event
-ordering, quarantine, reconciliation và quality-gated serving snapshot trước khi
-dữ liệu được Power BI sử dụng.
+End-to-end batch lakehouse xử lý incremental order events từ OMS bằng PySpark + Delta Lake.
+Pipeline đảm bảo idempotency, event ordering, quarantine, reconciliation và atomic publication
+trước khi dữ liệu được Power BI sử dụng.
 
 [![Python](https://img.shields.io/badge/Python-3.11%2B-3776AB.svg)](https://www.python.org/)
 [![Apache Spark](https://img.shields.io/badge/Apache%20Spark-3.5-E25A1C.svg)](https://spark.apache.org/)
@@ -76,7 +75,7 @@ flowchart TD
 
     OMS -. register file .-> FILES
     BRONZE -. update run .-> RUNS
-    VALIDATE -. metrics .-> RUNS
+    ROW_VALIDATE -. metrics .-> RUNS
     RECON -. PASS .-> PUB
     RECON -->|PASS| SERVING["Certified serving views"]
     RECON -->|FAIL| PREVIOUS["Giữ current_run_id trước"]
@@ -218,28 +217,28 @@ kê rõ trong run metadata.
 Ecommerce-Lakehouse-Analytics/
 ├── SourceCode/
 │   ├── lakehouse/
-│   │   ├── contracts/       # parser contract và Spark rules
+│   │   ├── contracts/       # phân tích contract và luật Spark
 │   │   ├── ingestion.py     # đọc CSV, hash, metadata, Bronze
 │   │   ├── silver.py        # validation, quarantine, current state
-│   │   ├── dimensions.py    # dimensions và SCD2 tùy chọn
-│   │   ├── marts.py         # facts, semantic base, marts
-│   │   ├── reconciliation.py # invariant checks
-│   │   ├── publication.py   # run snapshot và serving views
-│   │   ├── registry.py      # trạng thái run và metrics
-│   │   ├── file_manifest.py # trạng thái commit Bronze theo source hash
-│   │   └── storage.py       # Delta path/write helpers
+│   │   ├── dimensions.py    # dimension và SCD2 tùy chọn
+│   │   ├── marts.py         # fact, semantic base và mart
+│   │   ├── reconciliation.py # kiểm tra bất biến
+│   │   ├── publication.py   # snapshot và view serving
+│   │   ├── registry.py      # trạng thái run và số liệu
+│   │   ├── file_manifest.py # trạng thái commit Bronze theo mã băm nguồn
+│   │   └── storage.py       # đường dẫn và ghi Delta
 │   ├── SparkEcommerceAnalysis.py
 │   ├── project_cli.py
 │   ├── validate_input.py
 │   ├── build_business_report.py
-│   └── business_metrics.py  # KPI/Pandas cross-check
-├── contracts/               # YAML data contract và business policy
+│   └── business_metrics.py  # KPI và đối soát Pandas
+├── contracts/               # contract dữ liệu và chính sách nghiệp vụ YAML
 ├── Data/                    # seed và dữ liệu đầu vào local
-├── docs/                    # tài liệu theo từng concern
-├── powerbi/                 # Power BI artifact
-├── scripts/                 # contract validation và pipeline smoke test
-├── tests/                   # unit, Spark integration, fixture và invariants
-├── .github/workflows/       # CI Ruff + PySpark + Delta
+├── docs/                    # tài liệu theo từng mối quan tâm
+├── powerbi/                 # báo cáo Power BI
+├── scripts/                 # kiểm tra contract và pipeline
+├── tests/                   # kiểm thử đơn vị, Spark và bất biến
+├── .github/workflows/       # CI Ruff, PySpark và Delta
 ├── pyproject.toml
 └── README.md
 ```
@@ -311,6 +310,10 @@ python SourceCode/project_cli.py reconcile
 python SourceCode/project_cli.py report
 ```
 
+Các lệnh này gọi trực tiếp API trong package `lakehouse`; wrapper
+`SparkEcommerceAnalysis.py` chỉ giữ điểm vào tương thích cho CI và người dùng
+đã quen với lệnh cũ.
+
 Báo cáo mặc định đọc `serving.gold_sales_enriched` và
 `serving.fact_order_fulfillment` theo snapshot hiện hành; nó không lấy CSV raw
 làm nguồn dashboard. Power BI artifact nằm tại
@@ -332,7 +335,7 @@ Workflow [`.github/workflows/quality.yml`](.github/workflows/quality.yml) gồm:
 1. `fast-checks`: cài project từ `pyproject.toml`, lint, format toàn bộ source,
    validate YAML và chạy nhóm Python-only tests.
 2. `spark-integration`: cài Java 17, chạy toàn bộ tests, validate seed, bootstrap
-   Gold, dựng business report từ published snapshot và chạy smoke test incremental.
+   Gold, dựng business report từ published snapshot và chạy kiểm thử incremental.
 
 Integration tests không được `skip` khi thiếu PySpark hoặc Delta; thiếu dependency
 phải làm job thất bại để CI phản ánh đúng chất lượng repository.

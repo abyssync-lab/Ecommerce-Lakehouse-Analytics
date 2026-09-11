@@ -10,6 +10,7 @@ Kiểm chứng các thuộc tính cốt lõi của Data Lakehouse:
 
 from __future__ import annotations
 
+import hashlib
 import sys
 from pathlib import Path
 
@@ -21,7 +22,7 @@ if str(SOURCE_DIR) not in sys.path:
 
 from lakehouse.contracts.loader import load_contract, load_contract_for_columns
 from lakehouse.dimensions import build_all_dimensions
-from lakehouse.ingestion import calculate_source_hash, validate_raw_schema
+from lakehouse.ingestion import calculate_source_hash, calculate_source_size, validate_raw_schema
 from lakehouse.marts import (
     build_all_marts,
     build_fact_order_fulfillment,
@@ -450,6 +451,16 @@ def test_calculate_source_hash_idempotency(tmp_path):
         "Hai file cùng nội dung nhưng khác tên phải sinh ra hash giống nhau để chống duplicate!"
     )
     assert hash1 != hash3, "Nội dung file khác nhau phải sinh ra hash khác nhau!"
+
+
+def test_source_hash_and_size_accept_file_uri(tmp_path):
+    """Đảm bảo file URI không bị mất dấu slash khi tính metadata nguồn."""
+    source = tmp_path / "orders batch.csv"
+    content = b"Order_ID,Revenue\nORD-1,100.0\n"
+    source.write_bytes(content)
+
+    assert calculate_source_hash(source.as_uri()) == hashlib.sha256(content).hexdigest()
+    assert calculate_source_size(source.as_uri()) == len(content)
 
 
 def test_pipeline_run_result_dataclass_contract():

@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import os
 import uuid
 from pathlib import Path
 from typing import Any
+from urllib.parse import unquote, urlparse
 
-from config import SETTINGS
+from config import PIPELINE_VERSION, SETTINGS
 from pyspark.sql.functions import (
     col,
     current_timestamp,
@@ -24,14 +26,50 @@ from .file_manifest import FileManifest
 from .registry import BatchRegistry
 
 LOGGER = logging.getLogger(__name__)
-PIPELINE_VERSION = "1.0.0"
+
+
+def _resolve_local_path(file_path: str | None) -> Path | None:
+    """Đổi đường dẫn thường hoặc file URI thành đường dẫn local hợp lệ.
+
+    Pipeline chỉ hỗ trợ file local ở phiên bản hiện tại. Không được âm thầm
+    biến một URI remote thành tên file tương đối vì như vậy hash có thể được
+    tính sai hoặc lỗi nguồn bị phát hiện quá muộn.
+    """
+    if not file_path:
+        return None
+
+    # urlparse hiểu "C:\\file.csv" là URI có scheme "c" nếu không xử lý trước.
+    if len(file_path) >= 2 and file_path[1] == ":" and file_path[0].isalpha():
+        return Path(file_path)
+
+    parsed = urlparse(file_path)
+    if parsed.scheme not in {"", "file"}:
+        raise ValueError(
+            f"Nguồn không được hỗ trợ: {file_path}. "
+            "Pipeline hiện chỉ nhận file local hoặc file URI."
+        )
+
+    if parsed.scheme == "":
+        return Path(unquote(parsed.path or file_path))
+
+    if parsed.netloc not in {"", "localhost"}:
+        # file://server/share là đường dẫn UNC hợp lệ trên Windows.
+        raw_path = f"//{parsed.netloc}{parsed.path}"
+    else:
+        raw_path = parsed.path
+
+    raw_path = unquote(raw_path)
+    # file:///C:/... có thêm một dấu / trước drive letter trên Windows.
+    if os.name == "nt" and len(raw_path) >= 3 and raw_path[0] == "/" and raw_path[2] == ":":
+        raw_path = raw_path[1:]
+    return Path(raw_path)
 
 
 def calculate_source_hash(file_path: str | None) -> str:
     """Tính SHA-256 trên bytes thật của file nguồn để kiểm soát idempotency.
 
     Args:
-        file_path: Đường dẫn tới file nguồn (POSIX, file:// hoặc URI).
+        file_path: Đường dẫn tới file nguồn local hoặc file URI local.
 
     Returns:
         Chuỗi băm SHA-256 dạng hex digest.
@@ -46,8 +84,9 @@ def calculate_source_hash(file_path: str | None) -> str:
     if not file_path:
         raise ValueError("Không thể tính source_hash khi thiếu đường dẫn file nguồn")
 
-    clean_path = file_path.replace("file:///", "").replace("file://", "")
-    p = Path(clean_path)
+    p = _resolve_local_path(file_path)
+    if p is None:
+        raise ValueError("Không thể tính source_hash khi thiếu đường dẫn file nguồn")
     if not p.is_file():
         raise FileNotFoundError(
             f"Không thể tính source_hash: file nguồn không tồn tại hoặc không phải file: {file_path}"
@@ -61,11 +100,12 @@ def calculate_source_hash(file_path: str | None) -> str:
 
 
 def calculate_source_size(file_path: str | None) -> int:
-    """Trả về kích thước bytes của source để audit manifest; URI không local trả về 0."""
+    """Trả về kích thước bytes của file local để ghi vào manifest nguồn."""
     if not file_path:
         return 0
-    clean_path = file_path.replace("file:///", "").replace("file://", "")
-    path = Path(clean_path)
+    path = _resolve_local_path(file_path)
+    if path is None:
+        return 0
     return path.stat().st_size if path.exists() and path.is_file() else 0
 
 
@@ -119,8 +159,8 @@ def enrich_with_ingestion_metadata(
     shash = source_hash or "hash_unspecified"
     contract = load_contract_for_columns(raw_df.columns)
 
-    # Hash mọi cột nghiệp vụ thực tế của DataFrame để event v2 không bị bỏ qua
-    # Source_Updated_At/Operation khi tạo record fingerprint.
+    # Mã băm dùng toàn bộ cột nghiệp vụ thực tế để event v2 không bị bỏ qua
+    # Source_Updated_At hoặc Operation khi tạo dấu vân tay bản ghi.
     biz_cols = [c for c in raw_df.columns if not c.startswith("_")]
     if not biz_cols:
         raise ValueError("Không tìm thấy cột nghiệp vụ để tạo _record_hash")
@@ -155,8 +195,8 @@ def read_raw_csv(spark: Any, input_path: str | None = None) -> Any:
     target_path = input_path or SETTINGS.get_input_path()
     LOGGER.info("Bắt đầu đọc dữ liệu CSV thô từ: %s", target_path)
 
-    # Đọc header dưới dạng string; kiểu dữ liệu chỉ được cast sau khi qua
-    # file-level contract và bootstrap adapter nếu đây là seed lịch sử.
+    # Đọc header dưới dạng chuỗi; chỉ ép kiểu sau khi qua kiểm tra hợp đồng
+    # cấp file và bộ chuyển đổi bootstrap cho dữ liệu lịch sử.
     raw_df = spark.read.option("header", True).option("inferSchema", False).csv(target_path)
     raw_count = raw_df.count()
     LOGGER.info("Đã đọc xong dữ liệu thô, tổng số dòng: %,d", raw_count)
@@ -202,8 +242,8 @@ def ingest_to_bronze(
     manifest = FileManifest(spark)
     source_system = "ecommerce_csv"
 
-    # File ledger quyết định Bronze đã commit hay chưa. Registry chỉ quản lý
-    # lifecycle của run nên không được dùng để kiểm soát append của file.
+    # Sổ file quyết định Bronze đã commit hay chưa. Registry chỉ quản lý vòng đời
+    # của run nên không được dùng để kiểm soát việc append file.
     if mode == "append" and manifest.is_bronze_committed(source_system, content_hash):
         LOGGER.warning(
             "File %s (Source Hash: %s) đã commit Bronze. Đọc lại Bronze, không append lại.",
@@ -224,8 +264,8 @@ def ingest_to_bronze(
         run_id=rid,
     )
 
-    # Register trước khi đọc file để FILE_SCHEMA_MISMATCH/FILE_EMPTY cũng có
-    # lifecycle và lịch sử retry rõ ràng.
+    # Đăng ký trước khi đọc file để FILE_SCHEMA_MISMATCH/FILE_EMPTY cũng có
+    # vòng đời và lịch sử retry rõ ràng.
     if manage_registry:
         registry.start_run(
             run_id=rid,
@@ -260,7 +300,7 @@ def ingest_to_bronze(
         if manage_registry:
             registry.update_metrics(rid, raw_rows=raw_count)
             # Ingestion riêng lẻ mới chỉ hoàn tất Bronze; không đánh dấu SUCCESS
-            # vì Silver/Gold/Reconciliation chưa chạy.
+            # vì Silver/Gold/Reconciliation chưa chạy xong.
             registry.mark_validated(rid)
 
         LOGGER.info("Đã hoàn tất Ingestion tầng Bronze Delta (chế độ: %s, Batch: %s).", mode, bid)

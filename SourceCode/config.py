@@ -10,6 +10,8 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 
+PIPELINE_VERSION = "1.1.0"
+
 
 def detect_spark_home() -> Path:
     """Tự động tìm kiếm và xác định đường dẫn SPARK_HOME.
@@ -69,10 +71,10 @@ class Settings:
         str(Path(__file__).resolve().parents[1] / "Data" / "EcommerceSalesDataset.csv"),
     )
 
-    # Feature flags chỉ giữ cấu hình có tác động trực tiếp đến pipeline.
+    # Cờ tính năng chỉ giữ cấu hình có tác động trực tiếp đến pipeline.
     use_scd2: bool = _env_bool("ECOMMERCE_USE_SCD2", False)
 
-    # Spark Driver Network Configs dùng cho local và CI.
+    # Cấu hình mạng cho Spark Driver dùng ở local và CI.
     spark_driver_host: str | None = os.getenv("SPARK_DRIVER_HOST") or os.getenv("SPARK_LOCAL_IP")
     spark_driver_bind_address: str | None = os.getenv("SPARK_DRIVER_BIND_ADDRESS")
 
@@ -85,7 +87,6 @@ class Settings:
     silver_order_lines_delta: str = "/ecommerce/silver/silver_order_lines_current_delta"
     quarantine_delta: str = "/ecommerce/quarantine/rejected_rows"
     gold_star_schema_base: str = "/ecommerce/gold/star_schema"
-    gold_marts_base: str = "/ecommerce/gold/marts"
 
     def get_storage_path(self, relative_path: str) -> str:
         """Trả về file URI cho một bảng Delta trong local lakehouse.

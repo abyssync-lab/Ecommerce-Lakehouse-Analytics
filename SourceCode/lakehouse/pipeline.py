@@ -9,11 +9,11 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Any
 
-# Tôn trọng runtime do CI cung cấp; local dùng chính Python đang chạy.
+# Tôn trọng môi trường do CI cung cấp; local dùng đúng Python đang chạy.
 os.environ.setdefault("PYSPARK_PYTHON", sys.executable)
 os.environ.setdefault("PYSPARK_DRIVER_PYTHON", sys.executable)
 
-from config import SETTINGS, PipelineConfig, auto_set_spark_home_env
+from config import PIPELINE_VERSION, SETTINGS, PipelineConfig, auto_set_spark_home_env
 
 auto_set_spark_home_env()
 
@@ -34,6 +34,7 @@ from .ingestion import (
     calculate_source_size,
     enrich_with_ingestion_metadata,
     ingest_to_bronze,
+    read_raw_csv,
     validate_raw_schema,
 )
 from .marts import (
@@ -137,7 +138,7 @@ def create_spark_session() -> SparkSession:
             "org.apache.spark.sql.delta.catalog.DeltaCatalog",
         )
     )
-    # Entrypoint được gọi trực tiếp bằng `python`, vì vậy local/CI cần master
+    # Điểm vào được gọi trực tiếp bằng `python`, vì vậy local/CI cần master
     # mặc định thay vì phụ thuộc vào spark-submit đã cấu hình sẵn.
     builder = builder.master(os.getenv("SPARK_MASTER") or "local[2]")
 
@@ -184,9 +185,9 @@ def run_pipeline(
     try:
         source_hash = calculate_source_hash(source_uri)
     except Exception as exc:
-        # Không thể hash file thì không được giả làm content hash. Sentinel này
-        # chỉ giúp ghi nhận FAILED; sentinel này luôn bị loại khỏi
-        # idempotency lookup; khi file xuất hiện lại sẽ tính hash thật.
+        # Không thể mã băm file thì không được giả làm mã băm nội dung. Giá trị này
+        # chỉ để ghi nhận FAILED; giá trị này luôn bị loại khỏi tra cứu
+        # idempotency; khi file xuất hiện lại sẽ tính mã băm thật.
         source_hash = "hash_unavailable"
         source_hash_error = exc
     run_id = config.run_id if config and config.run_id else f"run_{uuid.uuid4().hex[:8]}"
@@ -206,8 +207,8 @@ def run_pipeline(
     run_started = False
 
     try:
-        # Bootstrap cũng phải replay-safe. Chỉ môi trường demo/reset mới được phép
-        # Một source hash đã công bố thì lượt chạy bình thường không được nạp lại.
+        # Bootstrap vẫn phải an toàn khi chạy lại. Chỉ thao tác reset demo có chủ
+        # đích mới được dọn storage; mã băm đã công bố không được nạp lại.
         if registry.is_batch_processed(source_hash):
             previous = registry.find_by_source_hash(source_hash)
             LOGGER.warning(
@@ -233,7 +234,7 @@ def run_pipeline(
             source_uri=source_uri,
             source_hash=source_hash,
             source_size_bytes=calculate_source_size(source_uri),
-            pipeline_version="1.1.0",
+            pipeline_version=PIPELINE_VERSION,
             contract_version="1.0.0",
         )
         run_started = True
@@ -241,7 +242,7 @@ def run_pipeline(
         if source_hash_error is not None:
             raise source_hash_error
 
-        # 1. Bronze: đọc file, validate schema và append raw event kèm lineage.
+        # 1. Bronze: đọc file, kiểm tra schema và append event thô kèm metadata truy vết.
         LOGGER.info("--- 1. INGESTION & 2. BRONZE LAYER ---")
         bronze_path = SETTINGS.get_storage_path(SETTINGS.bronze_delta)
         if DeltaTable.isDeltaTable(spark, bronze_path):
@@ -253,7 +254,7 @@ def run_pipeline(
             spark,
             effective_input,
             # Bootstrap bình thường append vào Bronze bất biến; việc xóa dữ liệu
-            # phải do operator thực hiện ngoài pipeline với phạm vi được xác nhận.
+            # phải do người vận hành thực hiện ngoài pipeline với phạm vi được xác nhận.
             mode="append",
             batch_id=batch_id,
             run_id=run_id,
@@ -265,7 +266,7 @@ def run_pipeline(
         registry.update_metrics(run_id, raw_rows=bronze_rows)
         registry.mark_validated(run_id)
 
-        # 2. Silver: clean, quarantine và tính accounting của batch.
+        # 2. Silver: làm sạch, quarantine và tính đối soát số dòng của batch.
         LOGGER.info("--- 3. SILVER LAYER & QUARANTINE ---")
         quarantine_path = (
             config.quarantine_path
@@ -315,7 +316,7 @@ def run_pipeline(
         )
         registry.mark_silver_merged(run_id)
 
-        # 3. Gold: build star schema và semantic marts từ cùng một Silver snapshot.
+        # 3. Gold: dựng star schema và semantic marts từ cùng một Silver snapshot.
         LOGGER.info("--- 4. GOLD LAYER - STAR SCHEMA (SCD2=%s) ---", effective_scd2)
         dimensions = build_all_dimensions(
             spark,
@@ -387,7 +388,7 @@ def run_pipeline(
             registry.mark_published(run_id, gold_run_id=run_id, published_version="1")
         except Exception as finalization_error:
             # Snapshot đã đổi nhưng metadata chưa ghi được: giữ trạng thái riêng
-            # để retry không đánh dấu FAILED sai một run đã visible cho Power BI.
+            # để retry không đánh dấu FAILED sai một run đã được Power BI nhìn thấy.
             registry.mark_publish_metadata_pending(run_id, finalization_error)
             raise
 
@@ -407,7 +408,7 @@ def run_pipeline(
             spark=spark,
         )
     except Exception as exc:
-        # Registry write failure phải được giữ nguyên để người vận hành biết metadata bị lỗi.
+        # Lỗi ghi Registry phải được giữ nguyên để người vận hành biết metadata bị lỗi.
         if run_started:
             current = registry.find_by_run_id(run_id)
             if current is None or current["status"] != "PUBLISH_METADATA_PENDING":
@@ -423,12 +424,91 @@ def run_pipeline(
                     ),
                 )
         raise
+
     finally:
         if clean_df is not None:
             clean_df.unpersist()
         if not pipeline_succeeded:
             # CLI không nhận được Spark để đóng khi pipeline lỗi.
             spark.stop()
+
+
+def run_incremental_from_path(
+    input_path: str | None = None,
+    *,
+    batch_id: str | None = None,
+    use_scd2: bool | None = None,
+) -> PipelineRunResult:
+    """Đọc một file incremental và chạy pipeline bằng một SparkSession riêng.
+
+    Đây là điểm vào dùng chung cho CLI và script tương thích. Phần xử lý lỗi
+    trước khi tạo DataFrame cũng ghi vào Run Registry và File Manifest để file
+    lỗi vẫn có dấu vết, còn lần retry sau không bị coi là đã xử lý thành công.
+    """
+    spark = create_spark_session()
+    source_uri = input_path or SETTINGS.get_input_path()
+    source_hash = "hash_unavailable"
+    run_id = f"run_{uuid.uuid4().hex[:8]}"
+    bid = batch_id or f"batch_{run_id.removeprefix('run_')}"
+
+    try:
+        source_hash = calculate_source_hash(source_uri)
+        new_batch_df = read_raw_csv(spark, input_path)
+    except Exception as exc:
+        registry = BatchRegistry(spark)
+        manifest = FileManifest(spark)
+        error_code = (
+            "SOURCE_FILE_NOT_FOUND"
+            if isinstance(exc, FileNotFoundError)
+            else "FILE_EMPTY"
+            if "FILE_EMPTY" in str(exc)
+            else "FILE_SCHEMA_MISMATCH"
+            if "FILE_SCHEMA_MISMATCH" in str(exc)
+            else "SOURCE_READ_FAILED"
+        )
+        try:
+            registry.start_run(
+                run_id=run_id,
+                batch_id=bid,
+                source_uri=source_uri,
+                source_hash=source_hash,
+                source_size_bytes=calculate_source_size(source_uri),
+                pipeline_version=PIPELINE_VERSION,
+                contract_version="2.0.0",
+            )
+            manifest.register_discovered(
+                source_system="ecommerce_csv",
+                source_hash=source_hash,
+                source_uri=source_uri,
+                file_size_bytes=calculate_source_size(source_uri),
+                contract_version="2.0.0",
+                run_id=run_id,
+            )
+            registry.mark_failed(run_id, exc, error_code=error_code)
+            manifest.mark_failed(
+                source_system="ecommerce_csv",
+                source_hash=source_hash,
+                run_id=run_id,
+                error_code=error_code,
+                error_message=str(exc),
+            )
+        except Exception as metadata_error:
+            raise RuntimeError(
+                "Không ghi được metadata cho nguồn incremental lỗi"
+            ) from metadata_error
+        raise
+
+    try:
+        return run_incremental_pipeline(
+            new_batch_df,
+            spark=spark,
+            batch_id=batch_id,
+            use_scd2=use_scd2,
+            source_hash=source_hash,
+            source_uri=source_uri,
+        )
+    finally:
+        spark.stop()
 
 
 def run_incremental_pipeline(
@@ -461,8 +541,8 @@ def run_incremental_pipeline(
     )
     run_id = config.run_id if config and config.run_id else f"run_{uuid.uuid4().hex[:8]}"
 
-    # Incremental không được tự sinh hash từ batch_id. Nếu làm vậy thì replay cùng file
-    # nhưng đổi batch_id sẽ nạp lại Bronze và phá vỡ idempotency theo nội dung.
+    # Incremental không được tự sinh mã băm từ batch_id. Nếu làm vậy, replay cùng
+    # file nhưng đổi batch_id sẽ nạp lại Bronze và phá vỡ idempotency theo nội dung.
     if not source_hash:
         raise ValueError(
             "Incremental pipeline bắt buộc nhận source_hash SHA-256 của nội dung file."
@@ -481,8 +561,8 @@ def run_incremental_pipeline(
     shash = source_hash
     source_location = source_uri or "incremental_dataframe"
 
-    # Idempotency kiểm tra trước mọi side effect. Cùng content hash đã PUBLISHED/SUCCESS
-    # phải trả về SKIPPED, còn FAILED vẫn được phép retry.
+    # Kiểm tra idempotency trước mọi tác động ghi dữ liệu. Cùng mã băm đã
+    # PUBLISHED/SUCCESS phải trả về SKIPPED, còn FAILED vẫn được phép retry.
     try:
         already_processed = registry.is_batch_processed(shash)
     except Exception:
@@ -521,12 +601,12 @@ def run_incremental_pipeline(
             source_hash=shash,
             raw_rows=raw_count,
             source_size_bytes=calculate_source_size(source_location),
-            pipeline_version="1.0.0",
+            pipeline_version=PIPELINE_VERSION,
             contract_version="2.0.0",
         )
         run_started = True
 
-        # Đăng ký file trước file-level validation để schema lỗi vẫn xuất hiện
+        # Đăng ký file trước kiểm tra cấp file để schema lỗi vẫn xuất hiện
         # trong metadata và có thể phân biệt với file chưa từng được phát hiện.
         manifest.register_discovered(
             source_system="ecommerce_csv",
@@ -545,7 +625,7 @@ def run_incremental_pipeline(
                 "FILE_SCHEMA_MISMATCH: incremental batch thiếu cột contract v2: "
                 + ", ".join(sorted(missing_event_columns))
             )
-        # API incremental có thể nhận DataFrame trực tiếp thay vì đi qua CLI;
+        # Hàm incremental có thể nhận DataFrame trực tiếp thay vì đi qua CLI;
         # vì vậy vẫn phải chạy đủ file-level validation trước khi ghi Bronze.
         validate_raw_schema(new_batch_df)
 
@@ -559,8 +639,8 @@ def run_incremental_pipeline(
             > 0
         )
         if manifest.is_bronze_committed("ecommerce_csv", shash) or bronze_has_source:
-            # Retry sau Gold failure: Bronze đã an toàn, chỉ đọc lại đúng file
-            # theo content hash và tiếp tục Silver/Gold.
+            # Retry sau lỗi Gold: Bronze đã an toàn, chỉ đọc lại đúng file
+            # theo mã băm nội dung và tiếp tục Silver/Gold.
             enriched_batch = (
                 spark.read.format("delta").load(bronze_path).filter(col("_source_hash") == shash)
             )
@@ -620,7 +700,7 @@ def run_incremental_pipeline(
             "Đã append %d dòng bản ghi mới vào Bronze Delta table (Batch: %s).", raw_count, bid
         )
 
-        # 2. Silver quality + quarantine theo đúng run hiện tại.
+        # 2. Kiểm tra chất lượng Silver và quarantine theo đúng run hiện tại.
         quarantine_path = (
             config.quarantine_path
             if config and config.quarantine_path
@@ -653,8 +733,8 @@ def run_incremental_pipeline(
         batch_duplicate_count = raw_count - deduplicated_batch_count
         batch_rejected_count = max(0, raw_count - batch_duplicate_count - valid_count)
         sequence_conflict_count = 0
-        # 3. Silver MERGE: chỉ dùng stable key của contract v2, tuyệt đối không fallback
-        # sang Product_Name hay các thuộc tính mutable.
+        # 3. Silver MERGE: chỉ dùng khóa ổn định của contract v2, tuyệt đối không
+        # fallback sang Product_Name hay thuộc tính có thể thay đổi.
         silver_path = SETTINGS.get_storage_path(SETTINGS.silver_delta)
         inserted_rows = updated_rows = unchanged_rows = stale_rows = deleted_rows = 0
         orphan_delete_rows = 0
@@ -821,7 +901,7 @@ def run_incremental_pipeline(
                     ),
                     set=delete_assignments,
                 )
-                # UPSERT event cũ/stale không được ghi đè event mới.
+                # Event UPSERT cũ không được ghi đè event mới.
                 .whenMatchedUpdateAll(
                     condition=(
                         "source.Source_Updated_At > target.Source_Updated_At "
@@ -1018,7 +1098,7 @@ def run_incremental_pipeline(
                     ),
                     error_message=str(exc),
                 )
-            # Chỉ đóng Spark do function tự tạo; fixture hoặc caller vẫn sở hữu Spark.
+            # Chỉ đóng Spark do hàm tự tạo; fixture hoặc bên gọi vẫn sở hữu Spark.
             if owns_spark:
                 spark.stop()
         raise

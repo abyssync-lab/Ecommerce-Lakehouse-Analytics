@@ -106,8 +106,8 @@ def publish_gold_run(spark: Any, tables: dict[str, Any], run_id: str) -> None:
     if not DeltaTable.isDeltaTable(spark, publication_target):
         _upsert_publication_pointer(spark, "__NONE__")
 
-    # Tạo view trước, pointer đổi sau cùng. Nếu write hoặc view fail, current_run_id
-    # vẫn là run cũ và Power BI tiếp tục đọc snapshot cũ.
+    # Tạo view trước, con trỏ đổi sau cùng. Nếu ghi dữ liệu hoặc tạo view lỗi,
+    # current_run_id vẫn là run cũ và Power BI tiếp tục đọc snapshot cũ.
     _create_serving_views(spark, list(tables))
     _upsert_publication_pointer(spark, run_id)
     LOGGER.info("Gold snapshot đã publish: current_run_id=%s", run_id)

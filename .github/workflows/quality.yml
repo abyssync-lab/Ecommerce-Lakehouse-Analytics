@@ -20,9 +20,9 @@ jobs:
     timeout-minutes: 10
     steps:
       - name: Checkout source
-        uses: actions/checkout@v6
+        uses: actions/checkout@v4
       - name: Set up Python
-        uses: actions/setup-python@v7
+        uses: actions/setup-python@v5
         with:
           python-version: "3.11"
           cache: pip
@@ -48,6 +48,7 @@ jobs:
           tests/test_project_cli.py
           tests/test_pipeline_invariants.py::test_partial_incremental_shape_fails_before_bronze
           tests/test_pipeline_invariants.py::test_calculate_source_hash_idempotency
+          tests/test_pipeline_invariants.py::test_source_hash_and_size_accept_file_uri
           tests/test_pipeline_invariants.py::test_pipeline_run_result_dataclass_contract
 
   spark-integration:
@@ -62,15 +63,15 @@ jobs:
       PYSPARK_DRIVER_PYTHON: python
     steps:
       - name: Checkout source
-        uses: actions/checkout@v6
+        uses: actions/checkout@v4
       - name: Set up Python
-        uses: actions/setup-python@v7
+        uses: actions/setup-python@v5
         with:
           python-version: "3.11"
           cache: pip
           cache-dependency-path: pyproject.toml
       - name: Set up Java for Spark
-        uses: actions/setup-java@v6
+        uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: "17"
@@ -84,5 +85,5 @@ jobs:
         run: python SourceCode/SparkEcommerceAnalysis.py --input Data/EcommerceSalesDataset.csv
       - name: Rebuild report from published Gold
         run: python SourceCode/build_business_report.py --source published
-      - name: Run incremental lakehouse smoke test
+      - name: Run incremental pipeline end-to-end check
         run: python scripts/run_demo_pipeline.py

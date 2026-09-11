@@ -55,7 +55,7 @@ def validate_silver_data(
         for rule_name, cond in contract_rules.items()
         if rule_name.split()[0] in source_column_set
     }
-    # Đảm bảo các quy tắc cốt lõi luôn có mặt
+    # Đảm bảo các quy tắc cốt lõi luôn có mặt.
     rules.setdefault("Order_ID không rỗng", col("Order_ID").isNotNull())
     rules.setdefault("Quantity > 0", col("Quantity") > 0)
     rules.setdefault("Unit_Price >= 0", col("Unit_Price") >= 0)
@@ -65,7 +65,7 @@ def validate_silver_data(
             "Source_Revenue >= 0",
             col("Source_Revenue").isNull() | (col("Source_Revenue") >= 0),
         )
-    # Shipping_Days là thuộc tính cấp đơn và có thể chưa xuất hiện ở event
+    # Shipping_Days là thuộc tính cấp đơn và có thể chưa xuất hiện trong event
     # tạo mới; NULL không phải là 0 và không được biến thành dữ liệu giả.
     rules.setdefault(
         "Shipping_Days >= 0",
@@ -73,7 +73,7 @@ def validate_silver_data(
     )
 
     failed = []
-    # DELETE chỉ mang khóa và metadata thứ tự; không áp dụng các quy tắc tài chính
+    # DELETE chỉ mang khóa và metadata thứ tự; không áp dụng quy tắc tài chính
     # của UPSERT lên những event này.
     validation_df = (
         clean_df.filter(col("Operation") != "DELETE")
@@ -98,8 +98,8 @@ def validate_silver_data(
         reject_rate,
     )
 
-    # Một batch chỉ có dòng lỗi vẫn phải trả về DataFrame rỗng để caller kiểm tra
-    # quarantine và reject-rate. Chính pipeline mới quyết định FAILED khi vượt ngưỡng.
+    # Batch chỉ có dòng lỗi vẫn phải trả về DataFrame rỗng để bên gọi kiểm tra
+    # quarantine và tỷ lệ loại. Pipeline mới quyết định FAILED khi vượt ngưỡng.
     no_accepted_rows_without_reason = (
         clean_count == 0 and raw_count > 0 and rejected_count == 0 and duplicate_count == 0
     )
@@ -130,22 +130,23 @@ def clean_and_enrich_silver(
     raw_count = raw_df.count()
     LOGGER.info("Bắt đầu quy trình làm sạch dữ liệu tầng Silver...")
 
-    # Loại trùng theo grain nghiệp vụ (loại trừ metadata kỹ thuật) và tính chính xác số lượng trùng.
+    # Loại trùng theo grain nghiệp vụ, bỏ qua metadata kỹ thuật, và đếm chính xác
+    # số bản ghi trùng.
     biz_cols = [c for c in raw_df.columns if not c.startswith("_")]
     dedup_df = raw_df.dropDuplicates(subset=biz_cols) if biz_cols else raw_df.dropDuplicates()
     duplicate_count = raw_count - dedup_df.count()
     typed_df = dedup_df
 
-    # Bộ chuyển đổi giúp bootstrap dataset lịch sử cũ theo contract event v2.
+    # Bộ chuyển đổi đưa dataset lịch sử cũ về contract event v2.
     # Chế độ incremental không được tự sinh line id; bên gọi truyền False để bắt lỗi nguồn.
     if "Product_Name" not in typed_df.columns and "Product_ID" in typed_df.columns:
         typed_df = typed_df.withColumn("Product_Name", col("Product_ID"))
     if "Product_ID" not in typed_df.columns and "Product_Name" in typed_df.columns:
         # Bootstrap lịch sử chỉ được phép sinh natural key Product_ID từ
-        # Product_Name; incremental v2 bắt buộc upstream gửi Product_ID thật.
+        # Product_Name; incremental v2 bắt buộc hệ thống nguồn gửi Product_ID thật.
         typed_df = typed_df.withColumn("Product_ID", sha2(trim(col("Product_Name")), 256))
 
-    # Event v2 cho incremental bắt buộc có Product_ID ở mức dòng UPSERT.
+    # Event v2 của incremental bắt buộc có Product_ID ở dòng UPSERT.
     # Đưa cột còn thiếu về NULL để quy tắc chất lượng tạo MISSING_PRODUCT_ID thay vì
     # để lỗi schema phát nổ muộn hơn trong lúc build dimension.
     is_incremental_event = not allow_line_id_fallback and {
@@ -167,9 +168,9 @@ def clean_and_enrich_silver(
     ]:
         if optional_text not in typed_df.columns:
             typed_df = typed_df.withColumn(optional_text, lit("Unknown"))
-    # Chuẩn hóa thuộc tính dùng làm khóa dimension. Spark không match được
-    # NULL = NULL trong phép join, vì vậy giá trị thiếu phải đi vào unknown
-    # member thay vì tạo foreign key NULL ở Gold.
+    # Chuẩn hóa thuộc tính dùng làm khóa dimension. Spark không ghép được
+    # NULL = NULL trong phép ghép, vì vậy giá trị thiếu phải đi vào thành viên
+    # Unknown thay vì tạo khóa ngoại NULL ở Gold.
     for dimension_text in ["Payment_Method", "Shipping_Method", "Region", "Country"]:
         typed_df = typed_df.withColumn(
             dimension_text,
@@ -221,8 +222,8 @@ def clean_and_enrich_silver(
     else:
         typed_df = typed_df.withColumn("Operation", trim(col("Operation")).alias("Operation"))
 
-    # Cùng line và cùng timestamp nhưng khác record hash là xung đột nguồn. Không
-    # được chọn ngẫu nhiên một phiên bản vì sẽ làm mất auditability của event.
+    # Cùng line và cùng timestamp nhưng khác mã băm bản ghi là xung đột nguồn.
+    # Không chọn ngẫu nhiên một phiên bản vì sẽ làm mất khả năng audit event.
     if "_record_hash" not in typed_df.columns:
         hash_expr = concat_ws(
             "\u001f",
@@ -283,7 +284,7 @@ def clean_and_enrich_silver(
             when(col("Revenue") != 0, (col("Profit") / col("Revenue")) * 100).otherwise(0.0),
         )
 
-    # Đánh giá điều kiện Hợp lệ và Phân lập Quarantine
+    # Đánh giá điều kiện hợp lệ và phân lập Quarantine.
     # Các trường dưới đây là bắt buộc cho UPSERT. Shipping_Cost và
     # Shipping_Days thuộc order-level, không được dùng để loại một line event.
     required_cols = [
@@ -349,7 +350,7 @@ def clean_and_enrich_silver(
 
     rejected_count = rejected_df.count()
     if rejected_count > 0:
-        # Thu thập toàn bộ danh sách các lỗi vi phạm (Multi-error tracking thay vì chỉ giữ 1 lỗi)
+        # Thu thập toàn bộ lỗi vi phạm thay vì chỉ giữ lỗi đầu tiên.
         is_upsert = col("Operation") == "UPSERT"
         order_id_present = col("Order_ID").isNotNull() & (
             trim(coalesce(col("Order_ID"), lit(""))) != ""
@@ -448,9 +449,10 @@ def clean_and_enrich_silver(
     clean_df = clean_df.drop("_sequence_conflict")
 
     # Định danh duy nhất cho từng dòng sản phẩm trong đơn (Order-Line Grain):
-    # - Nếu upstream cung cấp Order_Line_ID (và không rỗng), bảo toàn nguyên bản.
-    # - Nếu chưa có (dataset demo), sinh deterministic content fingerprint (Order_ID + Product_Name + Unit_Price + Quantity + Discount)
-    #   thay vì row_number() động, ngăn ngừa hoàn toàn nguy cơ đè nhầm bản ghi giữa các micro-batch MERGE.
+    # - Nếu hệ thống nguồn cung cấp Order_Line_ID (và không rỗng), bảo toàn nguyên bản.
+    # - Nếu chưa có (dataset demo), sinh dấu vân tay ổn định từ
+    #   Order_ID + Product_Name + Unit_Price + Quantity + Discount thay vì
+    #   row_number() động, tránh đè nhầm bản ghi giữa các micro-batch MERGE.
     source_contract = load_contract_for_columns(raw_df.columns)
     contract = source_contract
     fp_cols = [

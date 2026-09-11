@@ -49,7 +49,7 @@ class DatasetContract:
     @property
     def required_columns(self) -> set[str]:
         """Tập hợp các cột bắt buộc (không được null) cho dữ liệu thô đầu vào."""
-        # Order_Line_ID là cột định danh mức dòng có thể được sinh hoặc nạp
+        # Order_Line_ID là cột định danh mức dòng có thể được sinh hoặc nạp từ nguồn.
         return {
             name
             for name, col in self.columns.items()
@@ -171,18 +171,6 @@ def load_contract_for_columns(columns: set[str] | list[str]) -> DatasetContract:
     return load_contract(detect_contract_path(columns))
 
 
-def get_spark_raw_schema(contract: DatasetContract | None = None) -> Any:
-    """Sinh schema PySpark StringType cho toàn bộ các cột dữ liệu thô (Bronze Ingestion).
-
-    Tránh inferSchema=True gây schema drift giữa các batch.
-    """
-    from pyspark.sql.types import StringType, StructField, StructType
-
-    c = contract or load_contract()
-    fields = [StructField(col_name, StringType(), True) for col_name in c.columns.keys()]
-    return StructType(fields)
-
-
 def get_spark_silver_rules(contract: DatasetContract | None = None) -> dict[str, Any]:
     """Sinh biểu thức kiểm định chất lượng (PySpark Column expressions) từ contract."""
     from pyspark.sql.functions import col, lit
@@ -195,8 +183,8 @@ def get_spark_silver_rules(contract: DatasetContract | None = None) -> dict[str,
             rules[f"{col_name} không rỗng"] = col(col_name).isNotNull()
 
         # Cột nullable chỉ bị kiểm tra khi có giá trị. Nếu không bọc biểu thức
-        # bằng isNull(), Spark sẽ trả về NULL và validate_silver_data sẽ hiểu
-        # nhầm đó là một lỗi của event v2.
+        # bằng isNull(), Spark sẽ trả về NULL và validate_silver_data có thể
+        # hiểu nhầm đó là một lỗi của event v2.
         nullable_ok = col(col_name).isNull() if col_contract.nullable else lit(False)
 
         if col_contract.min is not None:

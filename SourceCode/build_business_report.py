@@ -102,10 +102,10 @@ def build_report(dataframe: pd.DataFrame, source_label: str = "published Gold se
         "",
         "## 2. Phát Hiện Phân Tích Nổi Bật (Key Business Insights)",
         "",
-        f"- 🌍 **{regions.iloc[0]['Region']}** là khu vực có doanh thu cao nhất trong dữ liệu với **{money(float(regions.iloc[0]['Revenue']))}**.",
-        f"- 🏷️ **{categories.iloc[0]['Category']}** là nhóm ngành có doanh thu cao nhất, chiếm **{categories.iloc[0]['Revenue'] / metrics.revenue * 100:.1f}%** tổng doanh thu.",
-        f"- 🏆 **{products.iloc[0]['Product_Name']}** là sản phẩm có doanh thu cao nhất với **{money(float(products.iloc[0]['Revenue']))}**.",
-        f"- ⚠️ Tỷ lệ đơn Returned hoặc Cancelled là **{metrics.return_rate_percent + metrics.cancellation_rate_percent:.2f}%** theo trạng thái current-state.",
+        f"- **{regions.iloc[0]['Region']}** là khu vực có doanh thu cao nhất trong dữ liệu với **{money(float(regions.iloc[0]['Revenue']))}**.",
+        f"- **{categories.iloc[0]['Category']}** là nhóm ngành có doanh thu cao nhất, chiếm **{categories.iloc[0]['Revenue'] / metrics.revenue * 100:.1f}%** tổng doanh thu.",
+        f"- **{products.iloc[0]['Product_Name']}** là sản phẩm có doanh thu cao nhất với **{money(float(products.iloc[0]['Revenue']))}**.",
+        f"- Tỷ lệ đơn Returned hoặc Cancelled là **{metrics.return_rate_percent + metrics.cancellation_rate_percent:.2f}%** theo trạng thái hiện hành.",
         "",
         "## 3. Phân Hạng Khách Hàng (RFM Customer Segmentation)",
         "",
@@ -127,13 +127,47 @@ def build_report(dataframe: pd.DataFrame, source_label: str = "published Gold se
         "",
         dataframe_to_markdown(products),
         "",
-        "## 🛠️ Hướng Dẫn Tái Tạo Báo Cáo Này",
+        "## Hướng Dẫn Tái Tạo Báo Cáo",
         "",
         "```powershell",
         "python SourceCode\\build_business_report.py",
         "```",
     ]
     return "\n".join(lines) + "\n"
+
+
+def load_published_dataframe() -> tuple[pd.DataFrame, str]:
+    """Đọc dữ liệu từ Gold snapshot đang được publication pointer trỏ tới."""
+    from lakehouse.pipeline import create_spark_session
+    from lakehouse.publication import get_current_publication
+
+    spark = create_spark_session()
+    try:
+        current_run_id = get_current_publication(spark)
+        if not current_run_id or current_run_id == "__NONE__":
+            raise RuntimeError(
+                "Chưa có published Gold snapshot. Hãy chạy pipeline thành công trước "
+                "hoặc dùng --source csv cho validation độc lập."
+            )
+
+        # Fact bán hàng có grain dòng đơn hàng, còn Shipping_Cost thuộc grain order.
+        # Join riêng fact order để báo cáo không nhân chi phí vận chuyển theo số dòng.
+        sales = spark.table("serving.gold_sales_enriched").drop("Publication_Run_ID").toPandas()
+        order_costs = (
+            spark.table("serving.fact_order_fulfillment")
+            .select("Order_ID", "Shipping_Cost")
+            .dropDuplicates(["Order_ID"])
+            .toPandas()
+            .rename(columns={"Shipping_Cost": "Order_Shipping_Cost"})
+        )
+        dataframe = sales.merge(order_costs, on="Order_ID", how="left", validate="many_to_one")
+        source_label = (
+            "serving.gold_sales_enriched + serving.fact_order_fulfillment "
+            f"(publication_run_id={current_run_id})"
+        )
+        return dataframe, source_label
+    finally:
+        spark.stop()
 
 
 def main() -> None:
@@ -152,46 +186,15 @@ def main() -> None:
     parser.add_argument("--output", type=Path, default=Path("docs/BUSINESS_INSIGHTS.md"))
     args = parser.parse_args()
 
-    spark = None
     if args.source == "published":
-        # Nạp Spark theo nhu cầu để chế độ --source csv vẫn chạy được trong CI nhẹ.
-        from lakehouse.pipeline import create_spark_session
-        from lakehouse.publication import get_current_publication
-
-        spark = create_spark_session()
-        try:
-            current_run_id = get_current_publication(spark)
-            if not current_run_id or current_run_id == "__NONE__":
-                raise RuntimeError(
-                    "Chưa có published Gold snapshot. Hãy chạy pipeline thành công trước "
-                    "hoặc dùng --source csv cho validation độc lập."
-                )
-
-            # Fact bán hàng có grain dòng đơn hàng, còn Shipping_Cost thuộc grain order.
-            # Join riêng fact order để báo cáo không nhân chi phí vận chuyển theo số dòng.
-            sales = spark.table("serving.gold_sales_enriched").drop("Publication_Run_ID").toPandas()
-            order_costs = (
-                spark.table("serving.fact_order_fulfillment")
-                .select("Order_ID", "Shipping_Cost")
-                .dropDuplicates(["Order_ID"])
-                .toPandas()
-                .rename(columns={"Shipping_Cost": "Order_Shipping_Cost"})
-            )
-            dataframe = sales.merge(order_costs, on="Order_ID", how="left", validate="many_to_one")
-            source_label = (
-                "serving.gold_sales_enriched + serving.fact_order_fulfillment "
-                f"(publication_run_id={current_run_id})"
-            )
-        finally:
-            spark.stop()
-            spark = None
+        dataframe, source_label = load_published_dataframe()
     else:
         dataframe = pd.read_csv(args.input)
         source_label = str(args.input)
 
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(build_report(dataframe, source_label=source_label), encoding="utf-8")
-    print(f"✨ Đã khởi tạo thành công báo cáo: {args.output}")
+    print(f"Đã tạo báo cáo: {args.output}")
 
 
 if __name__ == "__main__":

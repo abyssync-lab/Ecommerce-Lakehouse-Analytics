@@ -147,7 +147,7 @@ def build_fact_sales(
 
     dim_cust = dimensions["dim_customer"]
     if "ValidFrom" in dim_cust.columns and "ValidTo" in dim_cust.columns:
-        # Join theo thời gian với SCD Type 2.
+        # Ghép theo thời gian với SCD Type 2.
         fact_event_time = (
             col("Source_Updated_At") if "Source_Updated_At" in fact.columns else col("Order_Date")
         )
@@ -159,7 +159,7 @@ def build_fact_sales(
             how="left",
         ).drop(dim_cust["Customer_ID"])
     else:
-        # Join SCD Type 1 chuẩn; dim_customer bảo đảm mỗi Customer_ID chỉ có 1 dòng.
+        # Ghép SCD Type 1; dim_customer bảo đảm mỗi Customer_ID chỉ có một dòng.
         fact = fact.join(dim_cust, on=["Customer_ID"], how="left")
     fact = fact.join(dimensions["dim_geography"], on=["Region", "Country"], how="left")
     fact = fact.join(
@@ -231,7 +231,7 @@ def build_fact_order_fulfillment(
         round(spark_sum("Gross_Profit"), 2).alias("Order_Profit"),
     )
     # Fact order chỉ đại diện cho order còn ít nhất một dòng hiện hành. Nếu dùng
-    # left join, order đã xóa toàn bộ line sẽ vẫn xuất hiện với measure NULL.
+    # phép ghép trái, order đã xóa toàn bộ line vẫn xuất hiện với chỉ số NULL.
     orders = silver_orders_current.filter(~col("Is_Deleted")).join(
         line_metrics, on="Order_ID", how="inner"
     )
@@ -564,8 +564,8 @@ def build_sales_enriched(fact_sales: Any, dimensions: dict[str, Any]) -> Any:
         if "Quarter" in dim_date.columns:
             date_cols.append("Quarter")
 
-        # FactSales chỉ giữ DateKey để tránh lặp thuộc tính ngày. Semantic base phải
-        # khôi phục lại ngày nghiệp vụ với tên Order_Date mà toàn bộ mart đang dùng.
+        # FactSales chỉ giữ DateKey để tránh lặp thuộc tính ngày. Nền semantic phải
+        # khôi phục ngày nghiệp vụ với tên Order_Date mà toàn bộ mart đang dùng.
         if "Order_Date" not in enriched.columns:
             if "FullDate" in dim_date.columns:
                 date_cols.append(dim_date["FullDate"].alias("Order_Date"))
@@ -586,7 +586,7 @@ def build_all_marts(clean_df: Any) -> dict[str, Any]:
     summary và RFM để các kiểm thử API cũ không kéo theo một danh sách mart
     trùng lặp với Gold production.
     """
-    LOGGER.info("Bắt đầu xây dựng semantic smoke marts...")
+    LOGGER.info("Bắt đầu xây dựng bộ mart tương thích...")
 
     clean_df = _ensure_gold_measures(clean_df)
     overview = clean_df.agg(

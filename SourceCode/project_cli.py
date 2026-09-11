@@ -5,14 +5,12 @@ from __future__ import annotations
 import argparse
 import logging
 import os
-import subprocess
 import sys
 from pathlib import Path
 
 from environment_check import format_environment_report, inspect_environment
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-SOURCE_DIR = PROJECT_ROOT / "SourceCode"
 DEFAULT_DATASET = PROJECT_ROOT / "Data" / "EcommerceSalesDataset.csv"
 
 logging.basicConfig(
@@ -22,71 +20,86 @@ logging.basicConfig(
 LOGGER = logging.getLogger("GlobalCartCLI")
 
 
-def run_python(
-    script_name: str, arguments: list[str] | None = None, env_vars: dict[str, str] | None = None
-) -> int:
-    """Khởi chạy một script Python con với môi trường đã thiết lập.
-
-    Args:
-        script_name: Tên file script trong thư mục SourceCode.
-        arguments: Danh sách đối số truyền cho script.
-        env_vars: Từ điển các biến môi trường bổ sung.
-
-    Returns:
-        Mã thoát (Exit Code) của tiến trình con.
-    """
-    env = os.environ.copy()
-    if env_vars:
-        env.update(env_vars)
-    command = [sys.executable, str(SOURCE_DIR / script_name), *(arguments or [])]
-    return subprocess.run(command, cwd=PROJECT_ROOT, env=env, check=False).returncode
-
-
 def run_quality_checks() -> int:
     """Chạy chuỗi kiểm tra nhanh dữ liệu, sinh báo cáo và kiểm thử đơn vị.
 
     Returns:
         Mã thoát 0 nếu toàn bộ quy trình kiểm tra thành công.
     """
-    LOGGER.info("Kiểm tra hợp lệ file CSV thô đầu vào...")
-    validate_code = run_python("validate_input.py", [str(DEFAULT_DATASET)])
-    if validate_code != 0:
-        LOGGER.error("Kiểm tra validate_input thất bại với exit code %d", validate_code)
-        return validate_code
+    from build_business_report import build_report, load_published_dataframe
+    from lakehouse.pipeline import run_pipeline
+    from validate_input import validate_input_file
 
-    # Báo cáo chỉ có thể sinh sau khi bootstrap đã tạo và publish Gold.
-    # Không đọc report cũ hoặc CSV raw để che khuất lỗi của pipeline chính.
-    LOGGER.info("Chạy bootstrap pipeline để tạo published Gold...")
-    pipeline_code = run_python(
-        "SparkEcommerceAnalysis.py",
-        ["--input", str(DEFAULT_DATASET)],
-    )
-    if pipeline_code != 0:
-        LOGGER.error("Bootstrap pipeline thất bại với exit code %d", pipeline_code)
-        return pipeline_code
+    try:
+        LOGGER.info("Kiểm tra hợp lệ file CSV thô đầu vào...")
+        validate_input_file(DEFAULT_DATASET)
 
-    LOGGER.info("Sinh lại báo cáo Business Insights từ Gold...")
-    report_code = run_python("build_business_report.py")
-    if report_code != 0:
-        LOGGER.error("Tạo báo cáo report thất bại với exit code %d", report_code)
-        return report_code
+        # Báo cáo chỉ có thể sinh sau khi bootstrap đã tạo và publish Gold.
+        # Không đọc report cũ hoặc CSV raw để che khuất lỗi của pipeline chính.
+        LOGGER.info("Chạy bootstrap pipeline để tạo published Gold...")
+        result = run_pipeline(input_path=str(DEFAULT_DATASET))
+        if result.spark is not None:
+            result.spark.stop()
+
+        LOGGER.info("Sinh lại báo cáo Business Insights từ Gold...")
+        dataframe, source_label = load_published_dataframe()
+        output_path = PROJECT_ROOT / "docs" / "BUSINESS_INSIGHTS.md"
+        output_path.write_text(build_report(dataframe, source_label), encoding="utf-8")
+    except Exception:
+        LOGGER.exception("Lệnh check thất bại")
+        return 1
 
     LOGGER.info("Khởi chạy bộ kiểm thử tự động Pytest...")
-    return subprocess.run(
-        [sys.executable, "-m", "pytest", "-v"],
-        cwd=PROJECT_ROOT,
-        check=False,
-    ).returncode
+    import pytest
+
+    return pytest.main([str(PROJECT_ROOT / "tests"), "-v"])
 
 
 def run_reconciliation() -> int:
     """Khởi chạy bộ kiểm toán đối soát bất biến doanh thu, số dòng và SCD2."""
     LOGGER.info("Khởi chạy kiểm tra Gold reconciliation...")
-    return subprocess.run(
-        [sys.executable, "-m", "pytest", "tests/test_reconciliation.py", "-v"],
-        cwd=PROJECT_ROOT,
-        check=False,
-    ).returncode
+    import pytest
+
+    return pytest.main([str(PROJECT_ROOT / "tests" / "test_reconciliation.py"), "-v"])
+
+
+def run_pipeline_command(args: argparse.Namespace) -> int:
+    """Chạy bootstrap hoặc incremental bằng API package, không tạo process con."""
+    from lakehouse.pipeline import run_incremental_from_path, run_pipeline
+
+    is_incremental = args.incremental or args.mode == "incremental"
+    LOGGER.info(
+        "Khởi chạy Spark Lakehouse Pipeline (Mode=%s, SCD2=%s)...",
+        "INCREMENTAL" if is_incremental else "BOOTSTRAP",
+        str(bool(args.scd2)).lower(),
+    )
+
+    try:
+        if is_incremental:
+            result = run_incremental_from_path(
+                input_path=args.input,
+                batch_id=args.batch_id,
+                use_scd2=args.scd2,
+            )
+        else:
+            result = run_pipeline(input_path=args.input, use_scd2=args.scd2)
+            if result.spark is not None:
+                result.spark.stop()
+        return 0 if result.status in {"SUCCESS", "SKIPPED"} else 1
+    except Exception:
+        LOGGER.exception("Lệnh pipeline thất bại")
+        return 1
+
+
+def run_report_command() -> int:
+    """Sinh báo cáo từ Gold snapshot đang được công bố."""
+    from build_business_report import build_report, load_published_dataframe
+
+    dataframe, source_label = load_published_dataframe()
+    output_path = PROJECT_ROOT / "docs" / "BUSINESS_INSIGHTS.md"
+    output_path.write_text(build_report(dataframe, source_label), encoding="utf-8")
+    LOGGER.info("Đã tạo báo cáo: %s", output_path)
+    return 0
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -101,21 +114,21 @@ def build_parser() -> argparse.ArgumentParser:
     )
     commands = parser.add_subparsers(dest="command", required=True)
 
-    commands.add_parser("doctor", help="🏥 Chẩn đoán môi trường Python, Java và Spark")
+    commands.add_parser("doctor", help="Chẩn đoán môi trường Python, Java và Spark")
     commands.add_parser(
-        "check", help="🧪 Kiểm tra chất lượng dữ liệu đầu vào, sinh báo cáo & chạy Pytest"
+        "check", help="Kiểm tra chất lượng dữ liệu đầu vào, sinh báo cáo và chạy Pytest"
     )
-    commands.add_parser("report", help="📊 Sinh báo cáo business từ published Gold snapshot")
+    commands.add_parser("report", help="Sinh báo cáo kinh doanh từ Gold snapshot đã publish")
 
     reconcile_parser = commands.add_parser(
-        "reconcile", help="⚖️ Chạy kiểm tra đối soát doanh thu, grain và SCD2"
+        "reconcile", help="Chạy kiểm tra đối soát doanh thu, grain và SCD2"
     )
     reconcile_parser.add_argument(
         "--run-id", type=str, default=None, help="Mã nhận diện phiên kiểm toán"
     )
 
     pipeline_parser = commands.add_parser(
-        "pipeline", help="⚙️ Chạy Pipeline PySpark Medallion Lakehouse (Bootstrap / Incremental)"
+        "pipeline", help="Chạy pipeline PySpark Medallion Lakehouse (Bootstrap / Incremental)"
     )
     pipeline_parser.add_argument(
         "mode",
@@ -139,6 +152,7 @@ def build_parser() -> argparse.ArgumentParser:
     pipeline_parser.add_argument(
         "--scd2",
         action="store_true",
+        default=None,
         help="Kích hoạt mô hình hóa SCD Type 2 cho bảng Dimension Customer",
     )
     pipeline_parser.add_argument(
@@ -175,32 +189,12 @@ def main(arguments: list[str] | None = None) -> int:
         return run_reconciliation()
 
     if args.command == "pipeline":
-        env_vars = {}
-        script_args = []
-        is_incremental = (
-            getattr(args, "incremental", False)
-            or getattr(args, "mode", "bootstrap") == "incremental"
-        )
+        return run_pipeline_command(args)
 
-        if getattr(args, "scd2", False):
-            env_vars["ECOMMERCE_USE_SCD2"] = "true"
-            script_args.append("--scd2")
-        if getattr(args, "input", None):
-            script_args.extend(["--input", str(args.input)])
-        if getattr(args, "batch_id", None):
-            script_args.extend(["--batch-id", str(args.batch_id)])
-        if is_incremental:
-            script_args.append("--incremental")
+    if args.command == "report":
+        return run_report_command()
 
-        LOGGER.info(
-            "Khởi chạy Spark Lakehouse Pipeline (Mode=%s, SCD2=%s)...",
-            "INCREMENTAL" if is_incremental else "BOOTSTRAP",
-            env_vars.get("ECOMMERCE_USE_SCD2", "false"),
-        )
-        return run_python("SparkEcommerceAnalysis.py", arguments=script_args, env_vars=env_vars)
-
-    script_by_command = {"report": "build_business_report.py"}
-    return run_python(script_by_command[args.command])
+    raise ValueError(f"Lệnh không được hỗ trợ: {args.command}")
 
 
 if __name__ == "__main__":

@@ -10,7 +10,7 @@ import logging
 from datetime import UTC, datetime
 from typing import Any
 
-from config import SETTINGS
+from config import PIPELINE_VERSION, SETTINGS
 from delta.tables import DeltaTable
 from pyspark.sql.functions import col
 from pyspark.sql.types import (
@@ -102,10 +102,6 @@ class BatchRegistry:
     @staticmethod
     def _now() -> datetime:
         return datetime.now(UTC).replace(tzinfo=None)
-
-    def _empty_payload(self) -> dict[str, Any]:
-        """Tạo payload đầy đủ schema để insert không làm drift schema."""
-        return {field.name: None for field in self.REGISTRY_SCHEMA.fields}
 
     def _merge(self, payload: dict[str, Any]) -> None:
         """Upsert một phần trạng thái vào đúng ``run_id``."""
@@ -210,7 +206,7 @@ class BatchRegistry:
         source_hash: str,
         raw_rows: int = 0,
         source_system: str = "ecommerce_csv",
-        pipeline_version: str = "1.0.0",
+        pipeline_version: str = PIPELINE_VERSION,
         contract_version: str = "1.0.0",
         source_size_bytes: int = 0,
     ) -> None:

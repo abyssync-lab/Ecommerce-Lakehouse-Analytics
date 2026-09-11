@@ -89,7 +89,7 @@ def format_environment_report(statuses: list[DependencyStatus]) -> str:
     Returns:
         Chuỗi văn bản báo cáo đã định dạng.
     """
-    lines = ["🏥 BÁO CÁO CHẨN ĐOÁN MÔI TRƯỜNG HỆ THỐNG", "=" * 72]
+    lines = ["BÁO CÁO CHẨN ĐOÁN MÔI TRƯỜNG HỆ THỐNG", "=" * 72]
     for status in statuses:
         marker = "ĐẠT" if status.available else "THIẾU"
         lines.append(

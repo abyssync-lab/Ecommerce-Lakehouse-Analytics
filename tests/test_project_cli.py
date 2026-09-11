@@ -22,6 +22,9 @@ def test_cli_pipeline_subcommands_and_flags():
     assert args_boot.scd2 is True
     assert args_boot.mode == "bootstrap"
 
+    args_default = parser.parse_args(["pipeline"])
+    assert args_default.scd2 is None
+
     # Incremental explicit
     args_inc = parser.parse_args(
         ["pipeline", "incremental", "--input", "batch.csv", "--batch-id", "B001", "--scd2"]
