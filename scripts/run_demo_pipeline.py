@@ -17,6 +17,13 @@ def _read_event_file(spark, path: Path):
     return spark.read.option("header", True).option("inferSchema", False).csv(str(path))
 
 
+def _require(condition: bool, message: str) -> None:
+    """Dừng demo với thông báo đủ ngữ cảnh và tạo annotation rõ trên GitHub."""
+    if not condition:
+        print(f"::error title=GlobalCart incremental demo::{message}")
+        raise RuntimeError(message)
+
+
 def main() -> int:
     """Chạy hai batch độc lập rồi chạy lại batch thứ hai bằng tên file khác."""
     batch_one_path = FIXTURE_DIR / "order_events_batch_001.csv"
@@ -53,8 +60,14 @@ def main() -> int:
                 source_hash=hash_one,
                 source_uri=str(batch_one_path),
             )
-            assert first.status == "SUCCESS"
-            assert first.reconciliation_passed
+            _require(
+                first.status == "SUCCESS",
+                f"Batch 001 có trạng thái bất ngờ: {first.status!r}",
+            )
+            _require(
+                first.reconciliation_passed,
+                f"Batch 001 reconciliation không đạt: {first.reconciliation_report!r}",
+            )
 
             second = run_incremental_pipeline(
                 batch_two,
@@ -63,9 +76,18 @@ def main() -> int:
                 source_hash=hash_two,
                 source_uri=str(batch_two_path),
             )
-            assert second.status == "SUCCESS"
-            assert second.reconciliation_passed
-            assert second.published_run_id == second.run_id
+            _require(
+                second.status == "SUCCESS",
+                f"Batch 002 có trạng thái bất ngờ: {second.status!r}",
+            )
+            _require(
+                second.reconciliation_passed,
+                f"Batch 002 reconciliation không đạt: {second.reconciliation_report!r}",
+            )
+            _require(
+                second.published_run_id == second.run_id,
+                "Batch 002 không trỏ publication về chính run vừa hoàn tất.",
+            )
 
             # Kiểm chứng thứ tự đúng: chọn DELETE mới nhất trước khi lọc bản ghi xóa.
             lines_path = SETTINGS.get_storage_path(SETTINGS.silver_order_lines_delta)
@@ -73,10 +95,15 @@ def main() -> int:
             remaining = active_lines.select(
                 "Order_ID", "Order_Line_ID", "Quantity", "Net_Line_Amount"
             ).collect()
-            assert [(row.Order_ID, row.Order_Line_ID, row.Quantity) for row in remaining] == [
-                ("A001", "L1", 2)
-            ]
-            assert remaining[0].Net_Line_Amount == 200.0
+            remaining_keys = [(row.Order_ID, row.Order_Line_ID, row.Quantity) for row in remaining]
+            _require(
+                remaining_keys == [("A001", "L1", 2)],
+                f"Silver active lines sai sau DELETE: {remaining_keys!r}",
+            )
+            _require(
+                remaining[0].Net_Line_Amount == 200.0,
+                f"Net_Line_Amount của A001-L1 sai: {remaining[0].Net_Line_Amount!r}",
+            )
 
             sales_path = resolve_path("/ecommerce/serving/fact_sales_line_delta")
             sales = (
@@ -84,8 +111,16 @@ def main() -> int:
                 .load(sales_path)
                 .filter(f"Publication_Run_ID = '{second.run_id}'")
             )
-            assert sales.count() == 1
-            assert sales.select("Net_Line_Amount").first()[0] == 200.0
+            sales_count = sales.count()
+            _require(
+                sales_count == 1,
+                f"Fact sales của run {second.run_id} có {sales_count} dòng, kỳ vọng 1.",
+            )
+            sales_amount = sales.select("Net_Line_Amount").first()[0]
+            _require(
+                sales_amount == 200.0,
+                f"Fact sales Net_Line_Amount sai: {sales_amount!r}",
+            )
 
             order_fact_path = resolve_path("/ecommerce/serving/fact_order_fulfillment_delta")
             order_fact = (
@@ -93,10 +128,20 @@ def main() -> int:
                 .load(order_fact_path)
                 .filter(f"Publication_Run_ID = '{second.run_id}'")
             )
-            assert order_fact.count() == 1
+            order_fact_count = order_fact.count()
+            _require(
+                order_fact_count == 1,
+                f"Fact fulfillment của run {second.run_id} có {order_fact_count} dòng, kỳ vọng 1.",
+            )
             order_row = order_fact.first()
-            assert order_row.Order_ID == "A001"
-            assert order_row.Shipping_Cost == 20.0
+            _require(
+                order_row.Order_ID == "A001",
+                f"Fact fulfillment trả order bất ngờ: {order_row.Order_ID!r}",
+            )
+            _require(
+                order_row.Shipping_Cost == 20.0,
+                f"Shipping_Cost của A001 sai: {order_row.Shipping_Cost!r}",
+            )
 
             # Sao chép đúng dãy byte sang tên file khác để chứng minh mã băm dựa trên nội dung.
             replay_path = Path(storage_dir) / "renamed_replay.csv"
@@ -108,7 +153,10 @@ def main() -> int:
                 source_hash=calculate_source_hash(str(replay_path)),
                 source_uri=str(replay_path),
             )
-            assert replay.status == "SKIPPED"
+            _require(
+                replay.status == "SKIPPED",
+                f"Replay cùng nội dung không bị bỏ qua, trạng thái: {replay.status!r}",
+            )
 
             print("Kiểm thử đầu cuối lakehouse đã đạt.")
             print(f"first={first.run_id} second={second.run_id} replay={replay.status}")
