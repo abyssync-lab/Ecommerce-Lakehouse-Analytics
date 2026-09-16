@@ -110,8 +110,6 @@ def _customer_history_source(spark: SparkSession, fallback_df: Any, use_scd2: bo
 class ReconciliationError(Exception):
     """Ngoại lệ phát sinh khi Gold không vượt qua các kiểm tra đối soát."""
 
-    pass
-
 
 def create_spark_session() -> SparkSession:
     """Khởi tạo SparkSession local tích hợp Delta Lake."""
@@ -375,6 +373,10 @@ def run_pipeline(
             batch_id=batch_id,
         )
         silver_rows = clean_df.count()
+        if bronze_rows > 0 and silver_rows == 0:
+            raise ValueError(
+                "NO_VALID_EVENTS: bootstrap không có event hợp lệ để dựng Silver và Gold"
+            )
         bronze_business_columns = [
             column for column in bronze_df.columns if not column.startswith("_")
         ]
@@ -389,14 +391,15 @@ def run_pipeline(
             valid_event_rows=silver_rows,
         )
 
-        save_and_verify_delta(
-            clean_df, SETTINGS.silver_delta, "silver.ecommerce_clean", mode="overwrite"
-        )
-        # Hai bảng trạng thái hiện hành có grain rõ ràng; bảng combined ở trên chỉ
-        # giữ để tương thích trong giai đoạn chuyển đổi mã nguồn.
-        silver_orders_current = build_silver_orders_current(clean_df)
-        silver_order_lines_current = build_silver_order_lines_current(clean_df)
+        # Bảng Silver backing phải là current-state theo line. Bronze mới giữ mọi
+        # version; nếu ghi toàn bộ event vào đây, MERGE lần sau có thể gặp nhiều
+        # target cùng một khóa và làm mất tính xác định của incremental processing.
         current_silver = build_silver_current_events(clean_df)
+        save_and_verify_delta(
+            current_silver, SETTINGS.silver_delta, "silver.ecommerce_clean", mode="overwrite"
+        )
+        silver_orders_current = build_silver_orders_current(current_silver)
+        silver_order_lines_current = build_silver_order_lines_current(current_silver)
         save_and_verify_delta(
             silver_orders_current,
             SETTINGS.silver_orders_delta,

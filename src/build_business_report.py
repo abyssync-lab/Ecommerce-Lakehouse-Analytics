@@ -7,6 +7,7 @@ import sys
 from pathlib import Path
 
 import pandas as pd
+
 from business_metrics import (
     aggregate_performance,
     calculate_abc_product_analysis,
@@ -130,7 +131,7 @@ def build_report(dataframe: pd.DataFrame, source_label: str = "published Gold se
         "## Hướng Dẫn Tái Tạo Báo Cáo",
         "",
         "```powershell",
-        "python SourceCode\\build_business_report.py",
+        "python src\\build_business_report.py",
         "```",
     ]
     return "\n".join(lines) + "\n"
@@ -188,7 +189,7 @@ def main() -> None:
         default="published",
         help="Nguồn báo cáo: published Gold serving (mặc định) hoặc CSV validation độc lập",
     )
-    parser.add_argument("--input", type=Path, default=Path("Data/EcommerceSalesDataset.csv"))
+    parser.add_argument("--input", type=Path, default=Path("data/EcommerceSalesDataset.csv"))
     parser.add_argument("--output", type=Path, default=Path("docs/BUSINESS_INSIGHTS.md"))
     args = parser.parse_args()
 
@@ -205,7 +206,7 @@ def main() -> None:
         )
         print(
             "Gợi ý: Dùng cờ '--source csv' để sinh báo cáo độc lập trực tiếp từ file CSV, ví dụ:\n"
-            "  python SourceCode/build_business_report.py --source csv --input Data/EcommerceSalesDataset.csv",
+            "  python src/build_business_report.py --source csv --input data/EcommerceSalesDataset.csv",
             file=sys.stderr,
         )
         sys.exit(1)

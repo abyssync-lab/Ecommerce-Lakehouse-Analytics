@@ -30,9 +30,9 @@ jobs:
       - name: Install project and development dependencies
         run: python -m pip install -e ".[dev]"
       - name: Check formatting
-        run: python -m ruff format --check SourceCode tests scripts
+        run: python -m ruff format --check src tests scripts
       - name: Check lint
-        run: python -m ruff check SourceCode tests scripts
+        run: python -m ruff check src tests scripts
       - name: Validate YAML contracts
         run: python scripts/validate_contracts.py
       - name: Run Python-only tests
@@ -70,10 +70,10 @@ jobs:
       - name: Run all tests without skipping integration coverage
         run: python -m pytest -q
       - name: Validate seed input
-        run: python SourceCode/validate_input.py Data/EcommerceSalesDataset.csv
+        run: python src/validate_input.py data/EcommerceSalesDataset.csv
       - name: Build Gold serving snapshot
-        run: python SourceCode/SparkEcommerceAnalysis.py --input Data/EcommerceSalesDataset.csv
+        run: python src/SparkEcommerceAnalysis.py --input data/EcommerceSalesDataset.csv
       - name: Rebuild report from published Gold
-        run: python SourceCode/build_business_report.py --source published
+        run: python src/build_business_report.py --source published
       - name: Run incremental pipeline end-to-end check
         run: python scripts/run_demo_pipeline.py

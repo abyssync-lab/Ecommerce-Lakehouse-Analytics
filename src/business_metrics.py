@@ -8,6 +8,7 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass
 
 import pandas as pd
+
 from analytics_rules import calculate_abc_pandas, calculate_rfm_pandas
 
 

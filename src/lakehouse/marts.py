@@ -9,17 +9,6 @@ from pathlib import Path
 from typing import Any
 
 import yaml
-from analytics_rules import (
-    ABC_CLASS_A,
-    ABC_CLASS_B,
-    ABC_CLASS_C,
-    ABC_RULE_VERSION,
-    RFM_AT_RISK,
-    RFM_CASUAL,
-    RFM_CHAMPIONS,
-    RFM_LOYAL,
-    RFM_RULE_VERSION,
-)
 from pyspark.sql.functions import (
     avg,
     col,
@@ -34,6 +23,18 @@ from pyspark.sql.functions import (
 from pyspark.sql.functions import max as spark_max
 from pyspark.sql.functions import sum as spark_sum
 from pyspark.sql.window import Window
+
+from analytics_rules import (
+    ABC_CLASS_A,
+    ABC_CLASS_B,
+    ABC_CLASS_C,
+    ABC_RULE_VERSION,
+    RFM_AT_RISK,
+    RFM_CASUAL,
+    RFM_CHAMPIONS,
+    RFM_LOYAL,
+    RFM_RULE_VERSION,
+)
 
 from .dimensions import add_surrogate_key
 

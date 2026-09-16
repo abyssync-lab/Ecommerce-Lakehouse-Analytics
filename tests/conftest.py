@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-SOURCE_DIR = Path(__file__).parents[1] / "SourceCode"
+SOURCE_DIR = Path(__file__).parents[1] / "src"
 sys.path.insert(0, str(SOURCE_DIR))
 
 # Ép Spark chạy loopback trong CI để driver không cố bind vào hostname không phân giải được.

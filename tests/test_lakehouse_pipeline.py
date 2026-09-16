@@ -6,12 +6,13 @@ import sys
 from pathlib import Path
 
 import pytest
+from pyspark.sql.functions import col
 
 pytest.importorskip("pyspark")
 pytestmark = pytest.mark.spark
 
-# Thêm SourceCode vào sys.path.
-SOURCE_DIR = Path(__file__).resolve().parents[1] / "SourceCode"
+# Thêm src vào sys.path.
+SOURCE_DIR = Path(__file__).resolve().parents[1] / "src"
 if str(SOURCE_DIR) not in sys.path:
     sys.path.insert(0, str(SOURCE_DIR))
 
@@ -23,7 +24,6 @@ from lakehouse.marts import (
     build_rfm_mart,
 )
 from lakehouse.silver import clean_and_enrich_silver
-from pyspark.sql.functions import col
 
 
 def test_marts_when_import_and_rfm_abc(spark_session):

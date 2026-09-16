@@ -14,10 +14,11 @@ import logging
 from datetime import UTC, datetime
 from typing import Any
 
-from config import SETTINGS
 from delta.tables import DeltaTable
 from pyspark.sql.functions import col, lit
 from pyspark.sql.types import StringType, StructField, StructType, TimestampType
+
+from config import SETTINGS
 
 from .storage import resolve_path, save_and_verify_delta
 

@@ -11,7 +11,7 @@ docs/BUSINESS_INSIGHTS.md
 .venv/
 .env
 .idea/
-SourceCode/metastore_db/
-SourceCode/spark-warehouse/
-SourceCode/derby.log
+src/metastore_db/
+src/spark-warehouse/
+src/derby.log
 *.log

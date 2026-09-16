@@ -10,7 +10,6 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from typing import Any
 
-from config import SETTINGS
 from delta.tables import DeltaTable
 from pyspark.sql.functions import col
 from pyspark.sql.types import (
@@ -20,6 +19,8 @@ from pyspark.sql.types import (
     StructType,
     TimestampType,
 )
+
+from config import SETTINGS
 
 
 class FileManifest:

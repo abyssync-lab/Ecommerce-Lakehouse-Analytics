@@ -11,7 +11,7 @@ from pathlib import Path
 from environment_check import format_environment_report, inspect_environment
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_DATASET = PROJECT_ROOT / "Data" / "EcommerceSalesDataset.csv"
+DEFAULT_DATASET = PROJECT_ROOT / "data" / "EcommerceSalesDataset.csv"
 
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8")
@@ -53,7 +53,7 @@ def run_quality_checks() -> int:
     except ModuleNotFoundError as exc:
         LOGGER.error(
             "Lệnh check yêu cầu môi trường có PySpark và Delta Lake (%s). "
-            "Chạy 'python SourceCode/project_cli.py doctor' để kiểm tra.",
+            "Chạy 'python src/project_cli.py doctor' để kiểm tra.",
             exc,
         )
         return 1
@@ -101,7 +101,7 @@ def run_pipeline_command(args: argparse.Namespace) -> int:
     except ModuleNotFoundError as exc:
         LOGGER.error(
             "Lệnh pipeline yêu cầu môi trường có PySpark và Delta Lake (%s). "
-            "Chạy 'python SourceCode/project_cli.py doctor' để kiểm tra.",
+            "Chạy 'python src/project_cli.py doctor' để kiểm tra.",
             exc,
         )
         return 1
@@ -123,7 +123,7 @@ def run_report_command() -> int:
     except ModuleNotFoundError as exc:
         LOGGER.error(
             "Lệnh report yêu cầu môi trường có PySpark và Delta Lake (%s). "
-            "Chạy 'python SourceCode/project_cli.py doctor' để kiểm tra.",
+            "Chạy 'python src/project_cli.py doctor' để kiểm tra.",
             exc,
         )
         return 1

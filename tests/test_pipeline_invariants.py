@@ -14,11 +14,13 @@ import sys
 from pathlib import Path
 
 import pytest
+from pyspark.sql.functions import col
+from pyspark.sql.functions import sum as spark_sum
 
 pytest.importorskip("pyspark")
 pytestmark = pytest.mark.spark
 
-SOURCE_DIR = Path(__file__).resolve().parents[1] / "SourceCode"
+SOURCE_DIR = Path(__file__).resolve().parents[1] / "src"
 if str(SOURCE_DIR) not in sys.path:
     sys.path.insert(0, str(SOURCE_DIR))
 
@@ -36,8 +38,6 @@ from lakehouse.silver import (
     build_silver_orders_current,
     clean_and_enrich_silver,
 )
-from pyspark.sql.functions import col
-from pyspark.sql.functions import sum as spark_sum
 
 
 def test_order_line_key_is_stable_across_micro_batches(spark_session):

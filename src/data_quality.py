@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from typing import Literal
 
 import pandas as pd
+
 from lakehouse.contracts.loader import load_contract
 
 _CONTRACT = load_contract()

@@ -8,8 +8,8 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
-# Thêm SourceCode vào sys.path.
-SOURCE_DIR = Path(__file__).resolve().parents[1] / "SourceCode"
+# Thêm src vào sys.path.
+SOURCE_DIR = Path(__file__).resolve().parents[1] / "src"
 if str(SOURCE_DIR) not in sys.path:
     sys.path.insert(0, str(SOURCE_DIR))
 

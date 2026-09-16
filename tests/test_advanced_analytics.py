@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import pandas as pd
 import pytest
+
 from business_metrics import calculate_abc_product_analysis, calculate_rfm_segmentation
 
 

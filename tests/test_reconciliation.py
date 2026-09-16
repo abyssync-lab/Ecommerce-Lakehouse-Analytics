@@ -12,11 +12,13 @@ import sys
 from pathlib import Path
 
 import pytest
+from pyspark.sql.functions import countDistinct
+from pyspark.sql.functions import sum as spark_sum
 
 pytest.importorskip("pyspark")
 pytestmark = pytest.mark.spark
 
-SOURCE_DIR = Path(__file__).resolve().parents[1] / "SourceCode"
+SOURCE_DIR = Path(__file__).resolve().parents[1] / "src"
 if str(SOURCE_DIR) not in sys.path:
     sys.path.insert(0, str(SOURCE_DIR))
 
@@ -24,8 +26,6 @@ from lakehouse.dimensions import build_all_dimensions
 from lakehouse.marts import build_all_marts, build_fact_sales
 from lakehouse.reconciliation import run_full_reconciliation
 from lakehouse.silver import clean_and_enrich_silver
-from pyspark.sql.functions import countDistinct
-from pyspark.sql.functions import sum as spark_sum
 
 
 def test_gold_revenue_reconciles_with_silver_and_marts(spark_session):

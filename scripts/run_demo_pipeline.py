@@ -8,7 +8,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-SOURCE_DIR = PROJECT_ROOT / "SourceCode"
+SOURCE_DIR = PROJECT_ROOT / "src"
 FIXTURE_DIR = PROJECT_ROOT / "tests" / "fixtures"
 
 

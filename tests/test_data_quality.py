@@ -2,6 +2,7 @@ from pathlib import Path
 
 import pandas as pd
 import pytest
+
 from data_quality import assert_quality, validate_business_values, validate_columns
 
 
@@ -32,14 +33,14 @@ def test_valid_business_values_pass():
 
 
 def test_invalid_discount_fails_fast():
-    frame = pd.read_csv(Path(__file__).parents[1] / "Data" / "EcommerceSalesDataset.csv", nrows=2)
+    frame = pd.read_csv(Path(__file__).parents[1] / "data" / "EcommerceSalesDataset.csv", nrows=2)
     frame.loc[0, "Discount"] = 2
     with pytest.raises(ValueError, match="discount_range"):
         assert_quality(validate_business_values(frame))
 
 
 def test_negative_revenue_fails_row_validation():
-    frame = pd.read_csv(Path(__file__).parents[1] / "Data" / "EcommerceSalesDataset.csv", nrows=1)
+    frame = pd.read_csv(Path(__file__).parents[1] / "data" / "EcommerceSalesDataset.csv", nrows=1)
     frame.loc[0, "Revenue"] = -1
     with pytest.raises(ValueError, match="revenue_non_negative"):
         assert_quality(validate_business_values(frame))

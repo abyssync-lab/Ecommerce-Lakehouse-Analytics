@@ -69,7 +69,7 @@ class Settings:
     # Đường dẫn file dữ liệu đầu vào
     input_csv: str = os.getenv(
         "ECOMMERCE_INPUT_CSV",
-        str(Path(__file__).resolve().parents[1] / "Data" / "EcommerceSalesDataset.csv"),
+        str(Path(__file__).resolve().parents[1] / "data" / "EcommerceSalesDataset.csv"),
     )
 
     # Cờ tính năng chỉ giữ cấu hình có tác động trực tiếp đến pipeline.

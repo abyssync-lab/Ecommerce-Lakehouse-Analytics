@@ -41,20 +41,20 @@ Bootstrap là full initialization và chỉ chạy khi Bronze chưa tồn tại.
 dọn local storage có chủ đích.
 
 ~~~powershell
-python SourceCode/validate_input.py Data/EcommerceSalesDataset.csv
-python SourceCode/SparkEcommerceAnalysis.py --input Data/EcommerceSalesDataset.csv
+python src/validate_input.py data/EcommerceSalesDataset.csv
+python src/SparkEcommerceAnalysis.py --input data/EcommerceSalesDataset.csv
 ~~~
 
 ### Incremental
 
 ~~~powershell
-python SourceCode/SparkEcommerceAnalysis.py --incremental --input tests/fixtures/order_events_batch_001.csv --batch-id batch_20260907_0200
+python src/SparkEcommerceAnalysis.py --incremental --input tests/fixtures/order_events_batch_001.csv --batch-id batch_20260907_0200
 ~~~
 
 ### Report
 
 ~~~powershell
-python SourceCode/build_business_report.py --source published
+python src/build_business_report.py --source published
 ~~~
 
 published là source chuẩn. csv chỉ dành cho independent validation.
@@ -130,7 +130,7 @@ Workflow .github/workflows/quality.yml phải:
 
 1. cài Python và Java 17;
 2. cài project và nhóm dev từ `pyproject.toml`;
-3. chạy Ruff lint và format check trên toàn bộ `SourceCode`, `tests` và `scripts`;
+3. chạy Ruff lint và format check trên toàn bộ `src`, `tests` và `scripts`;
 4. parse toàn bộ YAML contract;
 5. chạy unit và Spark integration tests;
 6. validate input contract;

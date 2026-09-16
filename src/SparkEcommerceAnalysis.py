@@ -9,7 +9,7 @@ import argparse
 import sys
 from pathlib import Path
 
-# Thêm SourceCode vào sys.path để nạp mã nguồn lakehouse.
+# Thêm thư mục src vào sys.path để nạp mã nguồn lakehouse.
 SOURCE_DIR = Path(__file__).resolve().parent
 if str(SOURCE_DIR) not in sys.path:
     sys.path.insert(0, str(SOURCE_DIR))

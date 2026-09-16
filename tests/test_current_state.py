@@ -5,8 +5,9 @@ import pytest
 pytest.importorskip("pyspark")
 pytestmark = pytest.mark.spark
 
-from lakehouse.silver import build_silver_current_events, clean_and_enrich_silver
 from pyspark.sql.functions import col
+
+from lakehouse.silver import build_silver_current_events, clean_and_enrich_silver
 
 
 def test_current_event_snapshot_keeps_latest_non_deleted_line(spark_session):

@@ -56,32 +56,20 @@ báo cáo:
 
 ```mermaid
 flowchart TD
-    subgraph CONTROL["CONTROL PLANE"]
-        FILES["FileManifest\nsource hash + Bronze commit"]
-        RUNS["BatchRegistry\nrun status + metrics"]
-        PUB["Publication pointer\ncurrent_run_id"]
-    end
-
-    subgraph DATA["DATA PLANE"]
-        OMS["OMS CSV batch"] --> FILE_VALIDATE["File-level contract validation"]
-        FILE_VALIDATE -->|valid| BRONZE["Bronze\nraw change events"]
-        FILE_VALIDATE -->|invalid| FILE_FAIL["File rejected\nrun FAILED"]
-        BRONZE --> ROW_VALIDATE["Row quality validation"]
-        ROW_VALIDATE -->|invalid| QUARANTINE["Quarantine\nerror_codes"]
-        ROW_VALIDATE -->|valid| SILVER["Silver\ncurrent order + line state"]
-        SILVER --> GOLD["Gold staging\nfacts + six marts"]
-        GOLD --> RECON["Reconciliation"]
-    end
-
-    OMS -. register file .-> FILES
-    BRONZE -. update run .-> RUNS
-    ROW_VALIDATE -. metrics .-> RUNS
-    RECON -. PASS .-> PUB
-    RECON -->|PASS| SERVING["Certified serving views"]
-    RECON -->|FAIL| PREVIOUS["Giữ current_run_id trước"]
-    PUB --> SERVING
-    PREVIOUS --> SERVING
+    OMS["OMS CSV batch"] --> FILE_VALIDATE["File-level contract validation"]
+    FILE_VALIDATE -->|valid| BRONZE["Bronze Delta\nraw change events"]
+    FILE_VALIDATE -->|invalid| FILE_FAIL["File rejected\nrun FAILED"]
+    BRONZE --> ROW_VALIDATE["Row quality validation"]
+    ROW_VALIDATE -->|invalid| QUARANTINE["Quarantine\nerror_codes"]
+    ROW_VALIDATE -->|valid| SILVER["Silver Delta\ncurrent order + line state"]
+    SILVER --> GOLD["Gold staging\nKimball facts + marts"]
+    GOLD --> RECON["Reconciliation\naccounting + grain + FK"]
+    RECON -->|PASS| SERVING["Certified Gold\nserving snapshot"]
+    RECON -->|FAIL| PREVIOUS["Giữ snapshot đã publish"]
     SERVING --> POWERBI["Power BI"]
+    PREVIOUS --> POWERBI
+    OPS["Metadata vận hành tối thiểu\ncontent hash · run metrics · snapshot pointer"] -.-> BRONZE
+    OPS -.-> RECON
 ```
 
 ## Luồng data và pipeline
@@ -134,7 +122,7 @@ Order_ID, Order_Line_ID, Source_Updated_At, Operation
 Price hoặc Discount làm merge key. Contract v2 cho phép `UPSERT` và `DELETE`;
 DELETE chỉ cần khóa và timestamp, không cần các measure của UPSERT.
 
-Dataset `Data/EcommerceSalesDataset.csv` là seed historical đang được bootstrap
+Dataset `data/EcommerceSalesDataset.csv` là seed historical đang được bootstrap
 bằng adapter tương thích contract v1. Adapter chỉ dùng cho seed hiện có; batch
 incremental phải cung cấp `Order_Line_ID`, `Source_Updated_At` và `Operation`, nếu
 thiếu thì file bị từ chối.
@@ -180,7 +168,7 @@ Các marts chính gồm `mart_executive_daily`, `mart_product_performance`,
 `mart_geography_performance`, `mart_fulfillment_sla`, `mart_customer_rfm` và
 `mart_product_abc`. Business policy nằm ở
 [`contracts/business_metrics.yaml`](contracts/business_metrics.yaml), còn
-logic Spark nằm trong [`SourceCode/lakehouse/marts.py`](SourceCode/lakehouse/marts.py).
+logic Spark nằm trong [`src/lakehouse/marts.py`](src/lakehouse/marts.py).
 
 ## Data quality và reconciliation
 
@@ -215,17 +203,14 @@ kê rõ trong run metadata.
 
 ```text
 Ecommerce-Lakehouse-Analytics/
-├── SourceCode/
+├── src/
 │   ├── lakehouse/
 │   │   ├── contracts/       # phân tích contract và luật Spark
 │   │   ├── ingestion.py     # đọc CSV, hash, metadata, Bronze
 │   │   ├── silver.py        # validation, quarantine, current state
 │   │   ├── dimensions.py    # dimension và SCD2 tùy chọn
 │   │   ├── marts.py         # fact, semantic base và mart
-│   │   ├── reconciliation.py # kiểm tra bất biến
-│   │   ├── publication.py   # snapshot và view serving
-│   │   ├── registry.py      # trạng thái run và số liệu
-│   │   ├── file_manifest.py # trạng thái commit Bronze theo mã băm nguồn
+│   │   ├── reconciliation.py # kiểm tra accounting và grain
 │   │   └── storage.py       # đường dẫn và ghi Delta
 │   ├── SparkEcommerceAnalysis.py
 │   ├── project_cli.py
@@ -233,7 +218,7 @@ Ecommerce-Lakehouse-Analytics/
 │   ├── build_business_report.py
 │   └── business_metrics.py  # KPI và đối soát Pandas
 ├── contracts/               # contract dữ liệu và chính sách nghiệp vụ YAML
-├── Data/                    # seed và dữ liệu đầu vào local
+├── data/                    # seed và dữ liệu đầu vào local
 ├── docs/                    # tài liệu theo từng mối quan tâm
 ├── powerbi/                 # báo cáo Power BI
 ├── scripts/                 # kiểm tra contract và pipeline
@@ -242,6 +227,12 @@ Ecommerce-Lakehouse-Analytics/
 ├── pyproject.toml
 └── README.md
 ```
+
+Các module metadata vận hành (`file_manifest.py`, `registry.py` và
+`publication.py`) vẫn nằm trong `src/lakehouse` để hỗ trợ content hash, retry
+và snapshot serving. Chúng không phải một processing layer hay một nguồn dữ
+liệu riêng; câu chuyện chính của repository vẫn là incremental correctness,
+grain và reconciliation.
 
 ## Hướng dẫn cài đặt và chạy thử nghiệm
 
@@ -254,11 +245,11 @@ python -m pip install --upgrade pip
 python -m pip install -e ".[dev]"
 ```
 
-Đường dẫn mặc định là `Data/EcommerceSalesDataset.csv` và Delta được ghi vào
+Đường dẫn mặc định là `data/EcommerceSalesDataset.csv` và Delta được ghi vào
 `Output/lakehouse`. Có thể đổi bằng `.env` hoặc biến môi trường:
 
 ```powershell
-$env:ECOMMERCE_INPUT_CSV = "Data/EcommerceSalesDataset.csv"
+$env:ECOMMERCE_INPUT_CSV = "data/EcommerceSalesDataset.csv"
 $env:ECOMMERCE_LOCAL_STORAGE_BASE = "Output/lakehouse"
 $env:SPARK_LOCAL_IP = "127.0.0.1"
 # Tùy chọn: đặt cache JAR Delta ở thư mục có quyền ghi.
@@ -268,25 +259,21 @@ $env:SPARK_IVY_DIR = "$env:TEMP\globalcart-ivy2"
 ### Validate và bootstrap
 
 ```powershell
-python SourceCode/validate_input.py Data/EcommerceSalesDataset.csv
-python SourceCode/SparkEcommerceAnalysis.py --input Data/EcommerceSalesDataset.csv
+python src/validate_input.py data/EcommerceSalesDataset.csv
+python src/SparkEcommerceAnalysis.py --input data/EcommerceSalesDataset.csv
 ```
 
 Bootstrap chỉ chạy khi Bronze chưa có dữ liệu. Khi lakehouse đã có snapshot,
 dùng incremental batch hoặc reset thư mục `Output/lakehouse` có chủ đích trong
 môi trường demo.
 
-### Incremental, replay và SCD2
+### Incremental và replay
 
 ```powershell
-python SourceCode/SparkEcommerceAnalysis.py `
+python src/SparkEcommerceAnalysis.py `
   --incremental `
   --input path/to/orders_2026-09-07_0200.csv `
   --batch-id batch_20260907_0200
-
-python SourceCode/SparkEcommerceAnalysis.py `
-  --input Data/EcommerceSalesDataset.csv `
-  --scd2
 ```
 
 Chạy lại cùng incremental file sẽ dùng content hash để trả `SKIPPED` nếu run
@@ -306,10 +293,10 @@ file nhưng cùng content hash.
 ### CLI tiện ích
 
 ```powershell
-python SourceCode/project_cli.py --help
-python SourceCode/project_cli.py doctor
-python SourceCode/project_cli.py reconcile
-python SourceCode/project_cli.py report
+python src/project_cli.py --help
+python src/project_cli.py doctor
+python src/project_cli.py reconcile
+python src/project_cli.py report
 ```
 
 Các lệnh này gọi trực tiếp API trong package `lakehouse`; wrapper
@@ -326,8 +313,8 @@ làm nguồn dashboard. Power BI artifact nằm tại
 Chạy các kiểm tra nhanh trước khi mở pull request:
 
 ```powershell
-python -m ruff check SourceCode tests scripts
-python -m ruff format --check SourceCode tests scripts
+python -m ruff check src tests scripts
+python -m ruff format --check src tests scripts
 python scripts/validate_contracts.py
 python -m pytest -q
 ```
