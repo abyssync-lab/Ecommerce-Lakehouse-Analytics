@@ -206,14 +206,17 @@ kê rõ trong run metadata.
 Ecommerce-Lakehouse-Analytics/
 ├── src/
 │   ├── lakehouse/
-│   │   ├── contracts/       # phân tích contract và luật Spark
+│   │   ├── bootstrap.py      # đường chạy khởi tạo Bronze/Silver/Gold
+│   │   ├── incremental.py    # đường chạy event mới và Delta MERGE
+│   │   ├── gold.py           # dựng facts, dimensions, marts và publish
+│   │   ├── spark.py          # SparkSession + Delta runtime
+│   │   ├── pipeline.py       # API façade giữ tương thích cho caller cũ
 │   │   ├── ingestion.py     # đọc CSV, hash, metadata, Bronze
 │   │   ├── silver.py        # validation, quarantine, current state
 │   │   ├── dimensions.py    # dimension và SCD2 tùy chọn
 │   │   ├── marts.py         # fact, semantic base và mart
 │   │   ├── reconciliation.py # kiểm tra accounting và grain
 │   │   └── storage.py       # đường dẫn và ghi Delta
-│   ├── SparkEcommerceAnalysis.py
 │   ├── project_cli.py
 │   ├── validate_input.py
 │   ├── build_business_report.py
@@ -261,7 +264,7 @@ $env:SPARK_IVY_DIR = "$env:TEMP\globalcart-ivy2"
 
 ```powershell
 python src/validate_input.py data/EcommerceSalesDataset.csv
-python src/SparkEcommerceAnalysis.py --input data/EcommerceSalesDataset.csv
+globalcart pipeline bootstrap --input data/EcommerceSalesDataset.csv
 ```
 
 Bootstrap chỉ chạy khi Bronze chưa có dữ liệu. Khi lakehouse đã có snapshot,
@@ -271,8 +274,7 @@ môi trường demo.
 ### Incremental và replay
 
 ```powershell
-python src/SparkEcommerceAnalysis.py `
-  --incremental `
+globalcart pipeline incremental `
   --input path/to/orders_2026-09-07_0200.csv `
   --batch-id batch_20260907_0200
 ```
@@ -294,15 +296,15 @@ file nhưng cùng content hash.
 ### CLI tiện ích
 
 ```powershell
-python src/project_cli.py --help
-python src/project_cli.py doctor
-python src/project_cli.py reconcile
-python src/project_cli.py report
+globalcart --help
+globalcart doctor
+globalcart reconcile
+globalcart report
 ```
 
-Các lệnh này gọi trực tiếp API trong package `lakehouse`; wrapper
-`SparkEcommerceAnalysis.py` chỉ giữ điểm vào tương thích cho CI và người dùng
-đã quen với lệnh cũ.
+Các lệnh này gọi trực tiếp API trong package `lakehouse`. `pipeline.py` chỉ là
+façade; logic bootstrap và incremental nằm ở module tương ứng. Console script
+`globalcart` là điểm vào duy nhất để tránh hai cách chạy khác nhau.
 
 Báo cáo mặc định đọc `serving.gold_sales_enriched` và
 `serving.fact_order_fulfillment` theo snapshot hiện hành; nó không lấy CSV raw

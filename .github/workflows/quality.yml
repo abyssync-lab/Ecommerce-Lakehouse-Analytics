@@ -72,7 +72,7 @@ jobs:
       - name: Validate seed input
         run: python src/validate_input.py data/EcommerceSalesDataset.csv
       - name: Build Gold serving snapshot
-        run: python src/SparkEcommerceAnalysis.py --input data/EcommerceSalesDataset.csv
+        run: globalcart pipeline bootstrap --input data/EcommerceSalesDataset.csv
       - name: Rebuild report from published Gold
         run: python src/build_business_report.py --source published
       - name: Run incremental pipeline end-to-end check

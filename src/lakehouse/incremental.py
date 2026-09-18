@@ -1,0 +1,650 @@
+"""Luồng incremental xử lý event mới và cập nhật current state."""
+
+from __future__ import annotations
+
+import logging
+import uuid
+from typing import Any
+
+from delta.tables import DeltaTable
+from pyspark.sql import SparkSession
+from pyspark.sql.functions import array, col, current_timestamp, lit, row_number
+from pyspark.sql.window import Window
+
+from config import PIPELINE_VERSION, SETTINGS, PipelineConfig, PipelineRunResult
+
+from .file_manifest import FileManifest
+from .gold import build_and_publish_gold, customer_history_source
+from .ingestion import (
+    calculate_source_hash,
+    calculate_source_size,
+    enrich_with_ingestion_metadata,
+    read_raw_csv,
+    validate_raw_schema,
+)
+from .reconciliation import ReconciliationError
+from .registry import BatchRegistry
+from .silver import (
+    build_silver_current_events,
+    build_silver_order_lines_current,
+    build_silver_orders_current,
+    clean_and_enrich_silver,
+)
+from .spark import create_spark_session
+from .storage import save_and_verify_delta
+
+LOGGER = logging.getLogger(__name__)
+
+
+def run_incremental_from_path(
+    input_path: str | None = None,
+    *,
+    batch_id: str | None = None,
+    use_scd2: bool | None = None,
+) -> PipelineRunResult:
+    """Đọc một file incremental và chạy pipeline bằng một SparkSession riêng.
+
+    Đây là điểm vào dùng chung cho CLI và script tương thích. Phần xử lý lỗi
+    trước khi tạo DataFrame cũng ghi vào Run Registry và File Manifest để file
+    lỗi vẫn có dấu vết, còn lần retry sau không bị coi là đã xử lý thành công.
+    """
+    spark = create_spark_session()
+    source_uri = input_path or SETTINGS.get_input_path()
+    source_hash = "hash_unavailable"
+    run_id = f"run_{uuid.uuid4().hex[:8]}"
+    bid = batch_id or f"batch_{run_id.removeprefix('run_')}"
+
+    try:
+        source_hash = calculate_source_hash(source_uri)
+        new_batch_df = read_raw_csv(spark, input_path)
+    except Exception as exc:
+        registry = BatchRegistry(spark)
+        manifest = FileManifest(spark)
+        error_code = (
+            "SOURCE_FILE_NOT_FOUND"
+            if isinstance(exc, FileNotFoundError)
+            else "FILE_EMPTY"
+            if "FILE_EMPTY" in str(exc)
+            else "FILE_SCHEMA_MISMATCH"
+            if "FILE_SCHEMA_MISMATCH" in str(exc)
+            else "SOURCE_READ_FAILED"
+        )
+        try:
+            registry.start_run(
+                run_id=run_id,
+                batch_id=bid,
+                source_uri=source_uri,
+                source_hash=source_hash,
+                source_size_bytes=calculate_source_size(source_uri),
+                pipeline_version=PIPELINE_VERSION,
+                contract_version="2.0.0",
+            )
+            manifest.register_discovered(
+                source_system="ecommerce_csv",
+                source_hash=source_hash,
+                source_uri=source_uri,
+                file_size_bytes=calculate_source_size(source_uri),
+                contract_version="2.0.0",
+                run_id=run_id,
+            )
+            registry.mark_failed(run_id, exc, error_code=error_code)
+            manifest.mark_failed(
+                source_system="ecommerce_csv",
+                source_hash=source_hash,
+                run_id=run_id,
+                error_code=error_code,
+                error_message=str(exc),
+            )
+        except Exception as metadata_error:
+            raise RuntimeError(
+                "Không ghi được metadata cho nguồn incremental lỗi"
+            ) from metadata_error
+        raise
+
+    try:
+        return run_incremental_pipeline(
+            new_batch_df,
+            spark=spark,
+            batch_id=batch_id,
+            use_scd2=use_scd2,
+            source_hash=source_hash,
+            source_uri=source_uri,
+        )
+    finally:
+        spark.stop()
+
+
+def run_incremental_pipeline(
+    new_batch_df: Any,
+    spark: SparkSession | None = None,
+    batch_id: str | None = None,
+    use_scd2: bool | None = None,
+    config: PipelineConfig | None = None,
+    source_hash: str | None = None,
+    source_uri: str | None = None,
+) -> PipelineRunResult:
+    """Thực thi Incremental Ingestion & Delta MERGE INTO từ Bronze -> Silver -> Gold.
+
+    Quy trình:
+    1. Kiểm tra Batch Registry: Bỏ qua nếu batch hash đã xử lý thành công (Idempotency)
+    2. Bronze: Append dữ liệu mới kèm Ingestion Metadata
+    3. Silver: Làm sạch, lọc Quarantine và MERGE INTO theo stable Order_Line_ID grain
+    4. Gold: Cập nhật Star Schema và deterministic refresh Gold Marts
+    5. Gold reconciliation: Kiểm toán các bất biến bắt buộc trước khi publish snapshot.
+    """
+    effective_scd2 = (
+        use_scd2 if use_scd2 is not None else (config.use_scd2 if config else SETTINGS.use_scd2)
+    )
+    bid = (
+        batch_id
+        if batch_id is not None
+        else (
+            config.batch_id if config and config.batch_id else f"inc_batch_{uuid.uuid4().hex[:8]}"
+        )
+    )
+    run_id = config.run_id if config and config.run_id else f"run_{uuid.uuid4().hex[:8]}"
+
+    # Incremental không được tự sinh mã băm từ batch_id. Nếu làm vậy, replay cùng
+    # file nhưng đổi batch_id sẽ nạp lại Bronze và phá vỡ idempotency theo nội dung.
+    if not source_hash:
+        raise ValueError(
+            "Incremental pipeline bắt buộc nhận source_hash SHA-256 của nội dung file."
+        )
+    LOGGER.info("=====================================================")
+    LOGGER.info("THỰC THI INCREMENTAL PIPELINE WITH DELTA MERGE")
+    LOGGER.info("Run ID: %s | Batch ID: %s | SCD2: %s", run_id, bid, effective_scd2)
+    LOGGER.info("=====================================================")
+
+    owns_spark = spark is None
+    if spark is None:
+        spark = create_spark_session()
+
+    registry = BatchRegistry(spark)
+    manifest = FileManifest(spark)
+    shash = source_hash
+    source_location = source_uri or "incremental_dataframe"
+
+    # Kiểm tra idempotency trước mọi tác động ghi dữ liệu. Cùng mã băm đã
+    # PUBLISHED/SUCCESS phải trả về SKIPPED, còn FAILED vẫn được phép retry.
+    try:
+        already_processed = registry.is_batch_processed(shash)
+    except Exception:
+        # Nếu metadata không đọc được, không được để Spark do function sở hữu
+        # chạy ngầm sau khi caller đã nhận lỗi.
+        if owns_spark:
+            spark.stop()
+        raise
+    if already_processed:
+        LOGGER.warning("Batch %s (Hash: %s) ĐÃ XỬ LÝ THÀNH CÔNG TRƯỚC ĐÓ. Bỏ qua.", bid, shash[:10])
+        if owns_spark:
+            spark.stop()
+        return PipelineRunResult(
+            run_id=run_id,
+            batch_id=bid,
+            status="SKIPPED",
+            bronze_rows=0,
+            silver_rows=0,
+            quarantine_rows=0,
+            duplicate_rows=0,
+            reconciliation_passed=True,
+            spark=spark,
+        )
+
+    raw_count = 0
+    clean_batch = None
+    manifest_registered = False
+    bronze_committed = False
+    run_started = False
+    try:
+        raw_count = new_batch_df.count()
+        registry.start_run(
+            run_id=run_id,
+            batch_id=bid,
+            source_uri=source_location,
+            source_hash=shash,
+            raw_rows=raw_count,
+            source_size_bytes=calculate_source_size(source_location),
+            pipeline_version=PIPELINE_VERSION,
+            contract_version="2.0.0",
+        )
+        run_started = True
+
+        # Đăng ký file trước kiểm tra cấp file để schema lỗi vẫn xuất hiện
+        # trong metadata và có thể phân biệt với file chưa từng được phát hiện.
+        manifest.register_discovered(
+            source_system="ecommerce_csv",
+            source_hash=shash,
+            source_uri=source_location,
+            file_size_bytes=calculate_source_size(source_location),
+            contract_version="2.0.0",
+            run_id=run_id,
+        )
+        manifest_registered = True
+
+        required_event_columns = {"Order_ID", "Order_Line_ID", "Source_Updated_At", "Operation"}
+        missing_event_columns = required_event_columns.difference(new_batch_df.columns)
+        if missing_event_columns:
+            raise ValueError(
+                "FILE_SCHEMA_MISMATCH: incremental batch thiếu cột contract v2: "
+                + ", ".join(sorted(missing_event_columns))
+            )
+        # Hàm incremental có thể nhận DataFrame trực tiếp thay vì đi qua CLI;
+        # vì vậy vẫn phải chạy đủ file-level validation trước khi ghi Bronze.
+        validate_raw_schema(new_batch_df)
+
+        bronze_path = SETTINGS.get_storage_path(SETTINGS.bronze_delta)
+        bronze_has_source = DeltaTable.isDeltaTable(spark, bronze_path) and (
+            spark.read.format("delta")
+            .load(bronze_path)
+            .filter(col("_source_hash") == shash)
+            .limit(1)
+            .count()
+            > 0
+        )
+        if manifest.is_bronze_committed("ecommerce_csv", shash) or bronze_has_source:
+            # Retry sau lỗi Gold: Bronze đã an toàn, chỉ đọc lại đúng file
+            # theo mã băm nội dung và tiếp tục Silver/Gold.
+            enriched_batch = (
+                spark.read.format("delta").load(bronze_path).filter(col("_source_hash") == shash)
+            )
+            bronze_committed = True
+            if not manifest.is_bronze_committed("ecommerce_csv", shash):
+                # Khôi phục manifest nếu process chết sau Delta commit nhưng
+                # trước bước cập nhật metadata.
+                manifest.register_discovered(
+                    source_system="ecommerce_csv",
+                    source_hash=shash,
+                    source_uri=source_location,
+                    file_size_bytes=calculate_source_size(source_location),
+                    contract_version="2.0.0",
+                    run_id=run_id,
+                )
+                manifest.mark_bronze_committed(
+                    source_system="ecommerce_csv",
+                    source_hash=shash,
+                    run_id=run_id,
+                    raw_rows=enriched_batch.count(),
+                )
+            LOGGER.info(
+                "Retry run=%s dùng lại Bronze đã commit cho source_hash=%s; không append.",
+                run_id,
+                shash[:10],
+            )
+        else:
+            manifest.register_discovered(
+                source_system="ecommerce_csv",
+                source_hash=shash,
+                source_uri=source_location,
+                file_size_bytes=calculate_source_size(source_location),
+                contract_version="2.0.0",
+                run_id=run_id,
+            )
+            # Bronze chỉ append event thô và metadata; không cập nhật trạng thái hiện hành ở đây.
+            enriched_batch = enrich_with_ingestion_metadata(
+                new_batch_df,
+                batch_id=bid,
+                run_id=run_id,
+                source_hash=shash,
+                source_uri=source_location,
+                contract_version="2.0.0",
+            )
+            enriched_batch.write.format("delta").mode("append").save(bronze_path)
+            # Delta append đã thành công; registry file chỉ là bước cập nhật
+            # cập nhật metadata tiếp theo và không được đánh đồng hai sự kiện này.
+            bronze_committed = True
+            manifest.mark_bronze_committed(
+                source_system="ecommerce_csv",
+                source_hash=shash,
+                run_id=run_id,
+                raw_rows=raw_count,
+            )
+        registry.mark_validated(run_id)
+        LOGGER.info(
+            "Đã append %d dòng bản ghi mới vào Bronze Delta table (Batch: %s).", raw_count, bid
+        )
+
+        # 2. Kiểm tra chất lượng Silver và quarantine theo đúng run hiện tại.
+        quarantine_path = (
+            config.quarantine_path
+            if config and config.quarantine_path
+            else SETTINGS.get_storage_path(SETTINGS.quarantine_delta)
+        )
+        clean_batch = clean_and_enrich_silver(
+            enriched_batch,
+            quarantine_path=quarantine_path,
+            run_id=run_id,
+            batch_id=bid,
+            allow_line_id_fallback=False,
+        )
+        valid_count = clean_batch.count()
+        winning_window = Window.partitionBy("Order_ID", "Order_Line_ID").orderBy(
+            col("Source_Updated_At").desc(),
+            col("_source_row_number").desc(),
+        )
+        merge_batch = (
+            clean_batch.withColumn("_winning_row", row_number().over(winning_window))
+            .filter(col("_winning_row") == 1)
+            .drop("_winning_row")
+        )
+        superseded_count = valid_count - merge_batch.count()
+        batch_business_columns = [
+            column for column in new_batch_df.columns if not column.startswith("_")
+        ]
+        deduplicated_batch_count = new_batch_df.dropDuplicates(
+            subset=batch_business_columns
+        ).count()
+        batch_duplicate_count = raw_count - deduplicated_batch_count
+        batch_rejected_count = max(0, raw_count - batch_duplicate_count - valid_count)
+        sequence_conflict_count = 0
+        # 3. Silver MERGE: chỉ dùng khóa ổn định của contract v2, tuyệt đối không
+        # fallback sang Product_Name hay thuộc tính có thể thay đổi.
+        silver_path = SETTINGS.get_storage_path(SETTINGS.silver_delta)
+        inserted_rows = updated_rows = unchanged_rows = stale_rows = deleted_rows = 0
+        orphan_delete_rows = 0
+        if DeltaTable.isDeltaTable(spark, silver_path):
+            silver_delta_table = DeltaTable.forPath(spark, silver_path)
+            existing_cols = silver_delta_table.toDF().columns
+            required_target_columns = {
+                "Order_ID",
+                "Order_Line_ID",
+                "Source_Updated_At",
+                "Is_Deleted",
+            }
+            missing_target_columns = required_target_columns.difference(existing_cols)
+            if missing_target_columns:
+                raise ValueError(
+                    "Silver hiện tại chưa theo contract v2; thiếu cột: "
+                    + ", ".join(sorted(missing_target_columns))
+                )
+            missing_merge_columns = set(merge_batch.columns).difference(existing_cols)
+            if missing_merge_columns:
+                raise ValueError(
+                    "Silver schema không tương thích với event batch; thiếu cột đích: "
+                    + ", ".join(sorted(missing_merge_columns))
+                )
+
+            target_snapshot = silver_delta_table.toDF().select(
+                col("Order_ID").alias("_target_order_id"),
+                col("Order_Line_ID").alias("_target_line_id"),
+                col("Source_Updated_At").alias("_target_updated_at"),
+                col("_record_hash").alias("_target_record_hash"),
+            )
+            comparison = merge_batch.alias("source").join(
+                target_snapshot.alias("target"),
+                (col("source.Order_ID") == col("target._target_order_id"))
+                & (col("source.Order_Line_ID") == col("target._target_line_id")),
+                how="left",
+            )
+            target_exists = col("target._target_order_id").isNotNull()
+            source_newer = col("source.Source_Updated_At") > col("target._target_updated_at")
+            same_hash = col("source._record_hash").isNotNull() & (
+                col("source._record_hash") == col("target._target_record_hash")
+            )
+
+            # Cùng key và cùng timestamp với trạng thái hiện hành nhưng khác nội dung là
+            # sequence conflict ở cấp lịch sử, không được âm thầm bỏ qua.
+            historical_conflict_condition = (
+                target_exists
+                & (col("source.Source_Updated_At") == col("target._target_updated_at"))
+                & ~same_hash
+            )
+            historical_conflicts = comparison.filter(historical_conflict_condition).select(
+                *[col(f"source.{column}").alias(column) for column in merge_batch.columns]
+            )
+            sequence_conflict_count = historical_conflicts.count()
+            if sequence_conflict_count:
+                rejected_historical = (
+                    historical_conflicts.withColumn(
+                        "rejection_reasons", array(lit("SEQUENCE_CONFLICT"))
+                    )
+                    .withColumn("rejection_reason", lit("SEQUENCE_CONFLICT"))
+                    .withColumn("rejected_at", current_timestamp())
+                )
+                rejected_historical.write.format("delta").mode("append").option(
+                    "mergeSchema", "true"
+                ).save(quarantine_path)
+                conflict_keys = historical_conflicts.select(
+                    "Order_ID", "Order_Line_ID"
+                ).dropDuplicates()
+                merge_batch = merge_batch.join(
+                    conflict_keys, on=["Order_ID", "Order_Line_ID"], how="left_anti"
+                )
+                valid_count -= sequence_conflict_count
+                batch_rejected_count += sequence_conflict_count
+                # Tính lại comparison trên đúng tập event được phép merge.
+                comparison = merge_batch.alias("source").join(
+                    target_snapshot.alias("target"),
+                    (col("source.Order_ID") == col("target._target_order_id"))
+                    & (col("source.Order_Line_ID") == col("target._target_line_id")),
+                    how="left",
+                )
+                target_exists = col("target._target_order_id").isNotNull()
+                source_newer = col("source.Source_Updated_At") > col("target._target_updated_at")
+                same_hash = col("source._record_hash").isNotNull() & (
+                    col("source._record_hash") == col("target._target_record_hash")
+                )
+
+            inserted_rows = comparison.filter(
+                ~target_exists & (col("source.Operation") != "DELETE")
+            ).count()
+            updated_rows = comparison.filter(
+                target_exists & source_newer & (col("source.Operation") != "DELETE") & ~same_hash
+            ).count()
+            unchanged_rows = comparison.filter(target_exists & same_hash).count()
+            stale_rows = comparison.filter(
+                target_exists
+                & (col("source.Source_Updated_At") < col("target._target_updated_at"))
+                & ~same_hash
+            ).count()
+            deleted_rows = comparison.filter(
+                target_exists & source_newer & (col("source.Operation") == "DELETE")
+            ).count()
+            orphan_delete_rows = comparison.filter(
+                ~target_exists & (col("source.Operation") == "DELETE")
+            ).count()
+            if orphan_delete_rows:
+                # DELETE không có target trạng thái hiện hành phải được audit như dữ liệu
+                # lỗi; không được coi là event hợp lệ đã merge thành công.
+                orphan_deletes = comparison.filter(
+                    ~target_exists & (col("source.Operation") == "DELETE")
+                ).select(*[col(f"source.{column}").alias(column) for column in merge_batch.columns])
+                (
+                    orphan_deletes.withColumn("error_codes", array(lit("ORPHAN_DELETE")))
+                    .withColumn("rejection_reasons", col("error_codes"))
+                    .withColumn("rejection_reason", lit("ORPHAN_DELETE"))
+                    .withColumn("rejected_at", current_timestamp())
+                    .write.format("delta")
+                    .mode("append")
+                    .option("mergeSchema", "true")
+                    .save(quarantine_path)
+                )
+                valid_count -= orphan_delete_rows
+                batch_rejected_count += orphan_delete_rows
+                merge_batch = merge_batch.join(
+                    orphan_deletes.select("Order_ID", "Order_Line_ID").dropDuplicates(),
+                    on=["Order_ID", "Order_Line_ID"],
+                    how="left_anti",
+                )
+
+            merge_cond = (
+                "target.Order_ID = source.Order_ID AND target.Order_Line_ID = source.Order_Line_ID"
+            )
+            LOGGER.info("Thực thi Delta MERGE INTO Silver với điều kiện: %s", merge_cond)
+            # DELETE chỉ mang khóa, timestamp và metadata. Tách khỏi nhánh UPSERT
+            # để các cột nghiệp vụ rỗng của DELETE không được ghi đè lên current state.
+            delete_batch = merge_batch.filter(col("Operation") == "DELETE")
+            upsert_batch = merge_batch.filter(col("Operation") != "DELETE")
+            delete_assignments = {
+                column: f"source.{column}"
+                for column in [
+                    "Source_Updated_At",
+                    "Operation",
+                    "_record_hash",
+                    "_run_id",
+                    "_batch_id",
+                    "_source_hash",
+                    "_source_uri",
+                    "_source_file",
+                    "_source_row_number",
+                    "_ingested_at",
+                    "_contract_version",
+                    "_pipeline_version",
+                ]
+                if column in existing_cols and column in merge_batch.columns
+            }
+            delete_assignments["Is_Deleted"] = lit(True)
+            insert_assignments = {
+                column: f"source.{column}"
+                for column in upsert_batch.columns
+                if column in existing_cols
+            }
+            if delete_batch.limit(1).count() > 0:
+                (
+                    silver_delta_table.alias("target")
+                    .merge(delete_batch.alias("source"), merge_cond)
+                    .whenMatchedUpdate(
+                        condition="source.Source_Updated_At > target.Source_Updated_At",
+                        set=delete_assignments,
+                    )
+                    .execute()
+                )
+
+            if upsert_batch.limit(1).count() > 0:
+                (
+                    silver_delta_table.alias("target")
+                    .merge(upsert_batch.alias("source"), merge_cond)
+                    # Event UPSERT cũ không được ghi đè event mới.
+                    .whenMatchedUpdateAll(
+                        condition="source.Source_Updated_At > target.Source_Updated_At"
+                    )
+                    .whenNotMatchedInsert(values=insert_assignments)
+                    .execute()
+                )
+            LOGGER.info("Đã hoàn tất Delta MERGE INTO tầng Silver.")
+        else:
+            silver_inserts = merge_batch.filter(col("Operation") != "DELETE")
+            inserted_rows = silver_inserts.count()
+            orphan_delete_rows = merge_batch.filter(col("Operation") == "DELETE").count()
+            if orphan_delete_rows:
+                # Giữ lại DELETE mồ côi trong Quarantine để không làm mất event nguồn.
+                (
+                    merge_batch.filter(col("Operation") == "DELETE")
+                    .withColumn("error_codes", array(lit("ORPHAN_DELETE")))
+                    .withColumn("rejection_reasons", col("error_codes"))
+                    .withColumn("rejection_reason", lit("ORPHAN_DELETE"))
+                    .withColumn("rejected_at", current_timestamp())
+                    .write.format("delta")
+                    .mode("append")
+                    .option("mergeSchema", "true")
+                    .save(quarantine_path)
+                )
+                valid_count -= orphan_delete_rows
+                batch_rejected_count += orphan_delete_rows
+                merge_batch = silver_inserts
+            if inserted_rows == 0:
+                raise ValueError(
+                    "ORPHAN_DELETE: không thể tạo Silver current state từ DELETE mồ côi"
+                )
+            save_and_verify_delta(
+                silver_inserts, SETTINGS.silver_delta, "silver.ecommerce_clean", mode="append"
+            )
+        superseded_count = valid_count - merge_batch.count()
+        # Đồng bộ hai bảng trạng thái hiện hành sau khi MERGE event dòng hoàn tất.
+        full_merged_events = spark.read.format("delta").load(silver_path)
+        silver_orders_current = build_silver_orders_current(full_merged_events)
+        silver_order_lines_current = build_silver_order_lines_current(full_merged_events)
+        save_and_verify_delta(
+            silver_orders_current,
+            SETTINGS.silver_orders_delta,
+            "silver.silver_orders_current",
+            mode="overwrite",
+        )
+        save_and_verify_delta(
+            silver_order_lines_current,
+            SETTINGS.silver_order_lines_delta,
+            "silver.silver_order_lines_current",
+            mode="overwrite",
+        )
+        registry.update_metrics(
+            run_id,
+            raw_rows=raw_count,
+            exact_duplicate_rows=batch_duplicate_count,
+            rejected_rows=batch_rejected_count,
+            sequence_conflict_rows=sequence_conflict_count,
+            valid_event_rows=valid_count,
+            superseded_rows=superseded_count,
+            inserted_rows=inserted_rows,
+            updated_rows=updated_rows,
+            unchanged_rows=unchanged_rows,
+            stale_rows=stale_rows,
+            deleted_rows=deleted_rows,
+            orphan_delete_rows=orphan_delete_rows,
+        )
+        registry.mark_silver_merged(run_id)
+
+        # 4. Làm mới Gold core và marts từ Silver trạng thái hiện hành.
+        full_silver = spark.read.format("delta").load(silver_path)
+        active_silver = build_silver_current_events(full_silver)
+        recon_report = build_and_publish_gold(
+            spark=spark,
+            active_silver=active_silver,
+            silver_orders_current=silver_orders_current,
+            silver_order_lines_current=silver_order_lines_current,
+            effective_scd2=effective_scd2,
+            customer_history_source=customer_history_source(spark, active_silver, effective_scd2),
+            run_id=run_id,
+            registry=registry,
+            raw_count=raw_count,
+            duplicate_count=batch_duplicate_count,
+            invalid_count=batch_rejected_count,
+            valid_count=valid_count,
+            published_version="2",
+        )
+
+        LOGGER.info("--- THÀNH CÔNG: INCREMENTAL GOLD SNAPSHOT ĐÃ ĐƯỢC PUBLISH ---")
+        return PipelineRunResult(
+            run_id=run_id,
+            batch_id=bid,
+            status="SUCCESS",
+            bronze_rows=raw_count,
+            silver_rows=active_silver.count(),
+            quarantine_rows=batch_rejected_count,
+            duplicate_rows=batch_duplicate_count,
+            reconciliation_passed=True,
+            reconciliation_report=recon_report,
+            published_run_id=run_id,
+            spark=spark,
+        )
+    except Exception as exc:
+        # Bất kỳ lỗi nào ở Bronze/Silver/Gold/Reconciliation đều phải làm metadata
+        # chuyển FAILED để lần retry sau được phân biệt với một run đang chạy dở.
+        try:
+            if run_started:
+                current = registry.find_by_run_id(run_id)
+                if current is None or current["status"] != "PUBLISH_METADATA_PENDING":
+                    registry.mark_failed(
+                        run_id,
+                        exc,
+                        error_code=(
+                            "RECONCILIATION_FAILED"
+                            if isinstance(exc, ReconciliationError)
+                            else "PIPELINE_FAILED"
+                        ),
+                    )
+        finally:
+            if manifest_registered and not bronze_committed:
+                manifest.mark_failed(
+                    source_system="ecommerce_csv",
+                    source_hash=shash,
+                    run_id=run_id,
+                    error_code=(
+                        "FILE_SCHEMA_MISMATCH"
+                        if "FILE_SCHEMA_MISMATCH" in str(exc)
+                        else "PIPELINE_FAILED"
+                    ),
+                    error_message=str(exc),
+                )
+            # Chỉ đóng Spark do hàm tự tạo; fixture hoặc bên gọi vẫn sở hữu Spark.
+            if owns_spark:
+                spark.stop()
+        raise

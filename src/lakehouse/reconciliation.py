@@ -25,6 +25,10 @@ from .marts import load_business_policy
 LOGGER = logging.getLogger(__name__)
 
 
+class ReconciliationError(Exception):
+    """Ngoại lệ phát sinh khi Gold không vượt qua các kiểm tra đối soát."""
+
+
 def reconcile_revenue_invariant(
     clean_df: Any, fact_sales: Any, mart_overview: Any
 ) -> dict[str, Any]:

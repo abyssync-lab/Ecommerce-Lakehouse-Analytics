@@ -42,13 +42,13 @@ dọn local storage có chủ đích.
 
 ~~~powershell
 python src/validate_input.py data/EcommerceSalesDataset.csv
-python src/SparkEcommerceAnalysis.py --input data/EcommerceSalesDataset.csv
+globalcart pipeline bootstrap --input data/EcommerceSalesDataset.csv
 ~~~
 
 ### Incremental
 
 ~~~powershell
-python src/SparkEcommerceAnalysis.py --incremental --input tests/fixtures/order_events_batch_001.csv --batch-id batch_20260907_0200
+globalcart pipeline incremental --input tests/fixtures/order_events_batch_001.csv --batch-id batch_20260907_0200
 ~~~
 
 ### Report
