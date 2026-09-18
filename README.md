@@ -1,7 +1,7 @@
 # Ecommerce Lakehouse Analytics — GlobalCart Order & Fulfillment Platform
 
 End-to-end batch lakehouse xử lý incremental order events từ OMS bằng PySpark + Delta Lake.
-Pipeline đảm bảo idempotency, event ordering, quarantine, reconciliation và atomic publication
+Pipeline đảm bảo idempotency, event ordering, quarantine, reconciliation và certified publication
 trước khi dữ liệu được Power BI sử dụng.
 
 [![Python](https://img.shields.io/badge/Python-3.11%2B-3776AB.svg)](https://www.python.org/)
@@ -131,9 +131,10 @@ thiếu thì file bị từ chối.
 
 ### Bronze
 
-`bronze.ecommerce_raw` có grain một raw change event. Giá trị nguồn được giữ
-nguyên; metadata phục vụ lineage, replay và exact duplicate detection. Đây là
-lớp lịch sử, không dùng để tính current state bằng cách overwrite.
+`ecommerce/bronze/ecommerce_raw_delta` có grain một raw change event. Giá trị
+nguồn được giữ nguyên; metadata phục vụ lineage, replay và exact duplicate
+detection. Đây là lớp lịch sử, không dùng để tính current state bằng cách
+overwrite.
 
 ### Silver
 
